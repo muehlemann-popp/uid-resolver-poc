@@ -22,6 +22,13 @@ The agent decides for itself how many searches it needs; 2-6 tool calls is
 typical. Every step is streamed to the UI as an NDJSON event so you can follow
 the research live.
 
+## Repository
+
+<https://github.com/muehlemann-popp/uid-resolver-poc> (public)
+
+This is meant as a starting point for the developer, not as production code -
+read "Known limits" and "Recommended for production" below before building on it.
+
 ## Deployment
 
 Live (Vercel, team `muehlemann-popp`, project `uid-resolver-poc`):
@@ -163,4 +170,4 @@ strategies, source ranking and the confidence rules are all there.
 
 ---
 Created with AI assistance.
-Last updated: 2026-09-11 - Commit: (not committed yet)
+Last updated: 2026-09-11 - Commit: 0499cb5
