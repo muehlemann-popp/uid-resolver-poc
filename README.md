@@ -97,10 +97,20 @@ First measurements on the same inputs:
 |---|---|---|
 | `"Muehlemann und Pop Zuerich"` | CHE-115.471.001, conf. 0.95, $0.0503 | CHE-115.471.001, conf. 0.92, $0.0188 |
 | `"Ringier Axel Springer Schweitz"` | CHE-296.827.326, conf. 0.88, $0.1037 | CHE-296.827.326, conf. 0.90, $0.0362 |
+| `"Zuercher Kantonalbank"` | CHE-108.954.607, conf. 0.93, $0.0490 | **CHE-116.320.184**, conf. 0.95, $0.0144 |
 
-Same UIDs at roughly a third of the cost, including the rename case. That is two
-data points, not a verdict - build the evaluation set (point 6 below) before
-making Sonnet the default.
+Sonnet matches Opus on the first two at roughly a third of the cost, including
+the rename case - but **it fails the third one, and fails it confidently**: it
+returns the VAT number (`CHE-116.320.184 MWST`) instead of the commercial-register
+UID (`CHE-108.954.607`), and reports 0.95 confidence while doing so. Opus flagged
+exactly that trap in its rationale on the same input.
+
+That is the failure mode that matters here: a wrong UID with a high confidence
+score sails straight past a `>= 0.9` auto-accept threshold. Three data points are
+not a verdict either way - but they are the reason the evaluation set (point 6
+below) has to exist before the model choice is made, and why the eval needs to
+contain exactly these adversarial cases (VAT vs. register number, renames,
+holding vs. operating entity).
 
 ### Cost display
 
