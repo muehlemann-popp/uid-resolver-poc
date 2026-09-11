@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# VS Code Local History / OMC
+.history/
+.omc/
+
+# keep the template, not the real env files
+!.env.local.example

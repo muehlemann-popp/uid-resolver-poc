@@ -1,0 +1,31 @@
+version: "3"
+
+tasks:
+  dev:
+    desc: Start the dev server (http://localhost:3000)
+    cmds:
+      - pnpm dev
+
+  build:
+    desc: Production build
+    cmds:
+      - pnpm build
+
+  lint:
+    desc: ESLint + TypeScript
+    cmds:
+      - pnpm exec tsc --noEmit
+      - pnpm lint
+
+  deploy:
+    desc: Deploy to Vercel production (team muehlemann-popp)
+    cmds:
+      - vercel deploy --prod
+
+  resolve:
+    desc: 'Single lookup via the API, e.g. task resolve -- "Muehlemann und Pop"'
+    cmds:
+      - |
+        curl -sN -X POST http://localhost:3000/api/resolve \
+          -H 'Content-Type: application/json' \
+          -d (echo '{"companies":["{{.CLI_ARGS}}"]}')

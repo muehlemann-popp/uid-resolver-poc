@@ -1,36 +1,166 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# UID Resolver (Proof of Concept)
 
-## Getting Started
+An agent built on the **Anthropic SDK** (Claude Opus 5) + **Firecrawl** that maps
+misspelled company names to the Swiss company identification number
+(**UID**, `CHE-123.456.789`), together with a confidence score and a rationale.
 
-First, run the development server:
+Purpose: validate whether the approach works at all before building it out, and
+hand the developer a working reference implementation so they don't have to
+search in the dark.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## What the agent does
+
+```
+Company name (possibly misspelled)
+  -> Claude agent loop (max. 12 iterations)
+      |- firecrawl_search   POST /v2/search   (web search; snippets often already contain the UID)
+      `- firecrawl_scrape   POST /v2/scrape   (detail page as markdown: Zefix, Moneyhouse, imprint)
+  -> submit_result  { uid, official_name, domicile, confidence, reasoning, sources }
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The agent decides for itself how many searches it needs; 2-6 tool calls is
+typical. Every step is streamed to the UI as an NDJSON event so you can follow
+the research live.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deployment
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Live (Vercel, team `muehlemann-popp`, project `uid-resolver-poc`):
+<https://uid-resolver-poc.vercel.app>
 
-## Learn More
+The PoC sits behind a shared password gate (`src/proxy.ts` + `/login`). The
+password lives in the Vercel env var `SITE_PASSWORD` (sensitive) - rotating the
+password means changing the variable and redeploying, which invalidates all
+existing sessions. `ANTHROPIC_API_KEY` and `FIRECRAWL_API_KEY` are set as
+sensitive as well.
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+task deploy   # or: vercel deploy --prod
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Setup
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+pnpm install
+cp .env.local.example .env.local   # fill in the keys
+task dev                           # or: pnpm dev
+```
 
-## Deploy on Vercel
+`.env.local`:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+ANTHROPIC_API_KEY=sk-ant-...
+FIRECRAWL_API_KEY=fc-...
+SITE_PASSWORD=...
+FIRECRAWL_USD_PER_CREDIT=0.00083   # optional, for the cost display
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Usage
+
+- **UI:** <http://localhost:3000> - enter company names one per line; results come
+  back as a table (UID, official name, domicile, confidence) with an expandable
+  agent log and CSV export to the clipboard.
+- **API:**
+
+```bash
+curl -N -X POST http://localhost:3000/api/resolve \
+  -H 'Content-Type: application/json' \
+  -d '{"companies":["Muehlemann und Pop Zuerich"]}'
+```
+
+The response is an NDJSON stream (`start`, `thinking`, `tool_call`,
+`tool_result`, `cost`, `result`, `done`).
+
+### Cost display
+
+Every run is priced live in the UI: per-row cost, a total bar above the table
+(total, average per company, split into Claude vs. Firecrawl), and a token/credit
+breakdown in the detail panel. Costs also go into the CSV export.
+
+Pricing basis (`src/lib/cost.ts`):
+
+- **Claude Opus 5** $5.00 / $25.00 per 1M input / output tokens, taken from the
+  actual `usage` of every API response, not estimated.
+- **Firecrawl** 2 credits per search (2 per 10 results, and we cap at 10),
+  1 credit per scrape. A credit has no fixed USD price - the default assumes the
+  Standard plan (100k credits / $83 per month = $0.00083). Set
+  `FIRECRAWL_USD_PER_CREDIT` to match the actual plan.
+
+## Files
+
+| File | Contents |
+|---|---|
+| `src/lib/firecrawl.ts` | Minimal Firecrawl v2 client (`/search`, `/scrape`) |
+| `src/lib/agent.ts` | System prompt, tool definitions, agent loop, UID normalisation |
+| `src/lib/cost.ts` | Token/credit accounting and USD pricing |
+| `src/app/api/resolve/route.ts` | NDJSON streaming endpoint |
+| `src/app/page.tsx` | UI |
+| `src/proxy.ts`, `src/app/login/` | Shared-password access gate |
+
+The actual intelligence lives in the system prompt in `src/lib/agent.ts` - search
+strategies, source ranking and the confidence rules are all there.
+
+## Observations from the test runs
+
+- `"Muehlemann und Pop Zuerich"` -> `CHE-115.471.001` (muehlemann+popp AG, Zurich),
+  confidence 0.96, three searches and no scrape needed.
+- `"Zuercher Kantonalbank"` -> `CHE-108.954.607`, confidence 0.93. The agent
+  correctly spotted that the VAT number published on the company website is a
+  **different** number from the commercial-register UID - exactly the kind of
+  mistake a plain regex extraction would make.
+- `"Ringier Axel Springer Schweitz"` -> `CHE-296.827.326`, confidence 0.88, with
+  the note that the company was renamed to Ringier Magazine AG in 2023 and struck
+  from the register in 2024, plus an explicit distinction from the still-active
+  Ringier AG.
+- Invented company -> `uid: null`, confidence 0, with a rationale. No hallucination.
+- Cost/time per company: roughly 20-60 s and ~$0.05 (measured: `"Swisscom"` came
+  to $0.0518 - $0.0484 Claude + $0.0033 Firecrawl). The model dominates at ~94%
+  of the bill, because the full conversation history is resent on every
+  iteration. At that rate a batch over thousands of rows is too expensive - see
+  "Recommended for production" below.
+
+## Known limits of the PoC
+
+- **The Zefix search page is a SPA.** Scraping the hit list often yields empty
+  text. The system prompt instructs the agent not to read that as "company does
+  not exist", but it does push the search towards secondary sources (Moneyhouse,
+  NorthData, help.ch, imprints).
+- **No verification against a register.** The UID is read out of running text;
+  a second, deterministic check step is missing.
+- **No persistence, no cross-request caching**, no per-user auth. Firecrawl
+  scrapes use `maxAge: 24h` (Firecrawl's server-side cache).
+- Batches are capped at 25 names per request and run sequentially.
+
+## Recommended for production
+
+1. **A cascade rather than pure web search.** Important to know: **Zefix has no
+   fuzzy search.** The OpenAPI spec for `POST /api/v1/company/search` says of the
+   `name` field, verbatim: *"begin of the company name, * can be used as wildcard,
+   the search behaves like the exact search in the Zefix webapplication"* - so
+   prefix match plus wildcard, no Levenshtein distance, no ranking.
+   `Muehlemann*` does not find `muehlemann+popp AG`. The endpoint also requires
+   basic auth (401 without credentials); access is free on request via
+   zefix@bj.admin.ch. Recommended order:
+   - **(a) Query expansion against the Zefix API.** The model generates search
+     variants (umlaut normalisation, drop the legal form, "und" -> "+", truncate
+     to the distinctive prefix + `*`), Zefix does the exact lookups, the model
+     ranks the candidates. The fuzziness moves from the index into query
+     generation.
+   - **(b) Web search (this PoC) as the fallback** for cases where even the start
+     of the name is wrong or the input isn't a registered name at all: brand
+     names, branch designations, renames. Web search beats any register search there.
+2. **Enable prompt caching.** The system prompt and the tool definitions are
+   byte-stable across all iterations, but are currently resent uncached on every
+   one of them. A `cache_control` breakpoint on the system block would bill those
+   repeats at 0.1x. This is the single cheapest cost win and changes no behaviour.
+3. **Validate the UID check digit** (modulo 11) before accepting a result.
+4. **Result cache** (Postgres, timezone-aware `resolved_at`) so the same name is
+   never researched twice.
+5. **Human-in-the-loop threshold** as per the product concept: >= 0.9 automatic,
+   below that into a review queue.
+6. **Evaluation set**: 50-100 hand-verified name -> UID pairs from the real data,
+   so prompt changes become measurable. Without it, every further improvement is
+   guesswork.
+
+---
+Created with AI assistance.
+Last updated: 2026-09-11 - Commit: (not committed yet)

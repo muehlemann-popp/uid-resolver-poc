@@ -1,69 +1,400 @@
-import Image from "next/image";
+"use client";
+
+import { useRef, useState } from "react";
+import type { AgentEvent, ResolveResult } from "@/lib/agent";
+import { addCost, emptyCost, formatUsd, type Cost } from "@/lib/cost";
+
+type LogEntry = { kind: string; text: string };
+type Row = {
+  company: string;
+  status: "pending" | "running" | "done" | "error";
+  result?: ResolveResult;
+  /** Live cost, updated while the run is still in progress. */
+  cost?: Cost;
+  log: LogEntry[];
+};
+
+const EXAMPLES = [
+  "Mühlemann + Popp AG",
+  "Muehlemann und Pop",
+  "Swisscom",
+  "Ringier Axel Springer Schweiz",
+  "Zuercher Kantonalbank Zurich",
+  "Gugelhupf Bakery Hinterdorf",
+].join("\n");
 
 export default function Home() {
+  const [input, setInput] = useState(EXAMPLES);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [running, setRunning] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
+  const abort = useRef<AbortController | null>(null);
+
+  async function run() {
+    const companies = input
+      .split("\n")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    if (companies.length === 0) return;
+
+    setRows(companies.map((c) => ({ company: c, status: "pending", log: [] })));
+    setRunning(true);
+    abort.current = new AbortController();
+
+    const patch = (company: string, fn: (r: Row) => Row) =>
+      setRows((rs) => rs.map((r) => (r.company === company ? fn(r) : r)));
+
+    let current = companies[0];
+
+    try {
+      const res = await fetch("/api/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companies }),
+        signal: abort.current.signal,
+      });
+      if (!res.ok || !res.body) throw new Error(await res.text());
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const e = JSON.parse(line) as AgentEvent | { type: "done" };
+
+          if (e.type === "start") {
+            current = e.company;
+            setOpen(e.company);
+            patch(e.company, (r) => ({ ...r, status: "running" }));
+          } else if (e.type === "thinking") {
+            patch(current, (r) => ({
+              ...r,
+              log: [...r.log, { kind: "thinking", text: e.text }],
+            }));
+          } else if (e.type === "tool_call") {
+            patch(current, (r) => ({
+              ...r,
+              log: [
+                ...r.log,
+                { kind: e.tool, text: JSON.stringify(e.input) },
+              ],
+            }));
+          } else if (e.type === "tool_result") {
+            patch(current, (r) => ({
+              ...r,
+              log: [...r.log, { kind: "↳", text: e.summary }],
+            }));
+          } else if (e.type === "cost") {
+            patch(e.company, (r) => ({ ...r, cost: e.cost }));
+          } else if (e.type === "result") {
+            patch(e.company, (r) => ({
+              ...r,
+              status: "done",
+              result: e.result,
+              cost: e.result.cost,
+            }));
+          } else if (e.type === "error") {
+            patch(current, (r) => ({
+              ...r,
+              status: "error",
+              log: [...r.log, { kind: "error", text: e.message }],
+            }));
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        patch(current, (r) => ({
+          ...r,
+          status: "error",
+          log: [...r.log, { kind: "error", text: String(err) }],
+        }));
+      }
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function copyCsv() {
+    const csv = [
+      "Input;UID;Official name;Domicile;Confidence;Cost USD;Rationale",
+      ...rows.map((r) =>
+        [
+          r.company,
+          r.result?.uid ?? "",
+          r.result?.official_name ?? "",
+          r.result?.domicile ?? "",
+          r.result?.confidence?.toFixed(2) ?? "",
+          r.cost ? r.cost.total_usd.toFixed(5) : "",
+          (r.result?.reasoning ?? "").replace(/[\r\n;]+/g, " "),
+        ].join(";"),
+      ),
+    ].join("\n");
+    navigator.clipboard.writeText(csv);
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main className="mx-auto max-w-5xl px-4 py-10">
+      <header className="mb-8">
+        <h1 className="text-3xl font-extrabold tracking-tight text-neutral-800">
+          UID Resolver
+        </h1>
+        <p className="mt-2 max-w-2xl text-sm text-neutral-600">
+          Proof of concept: a Claude agent maps misspelled company names to the
+          Swiss company identification number via Firecrawl (web search +
+          scraping) - with a confidence score and a rationale.
+        </p>
+      </header>
+
+      <section className="mb-8 rounded-lg border border-neutral-200 bg-white p-4">
+        <label className="mb-2 block text-sm font-semibold text-neutral-700">
+          Company names (one per line, max. 25)
+        </label>
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          rows={7}
+          spellCheck={false}
+          className="w-full resize-y rounded border border-neutral-300 p-3 font-mono text-sm outline-none focus:border-[var(--color-mustard)]"
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+        <div className="mt-3 flex items-center gap-3">
+          <button
+            onClick={run}
+            disabled={running}
+            className="rounded bg-[var(--color-mustard)] px-5 py-2 text-sm font-bold text-neutral-900 transition hover:brightness-95 disabled:opacity-50"
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            {running ? "Running …" : "Resolve UIDs"}
+          </button>
+          {running && (
+            <button
+              onClick={() => abort.current?.abort()}
+              className="rounded border border-neutral-300 px-4 py-2 text-sm"
+            >
+              Cancel
+            </button>
+          )}
+          {rows.some((r) => r.result) && (
+            <button
+              onClick={copyCsv}
+              className="rounded border border-neutral-300 px-4 py-2 text-sm"
+            >
+              Copy as CSV
+            </button>
+          )}
         </div>
-      </main>
-    </div>
+      </section>
+
+      {rows.length > 0 && <CostSummary rows={rows} />}
+
+      {rows.length > 0 && (
+        <section className="overflow-hidden rounded-lg border border-neutral-200 bg-white">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-neutral-100 text-xs uppercase tracking-wide text-neutral-500">
+              <tr>
+                <th className="px-4 py-3">Input</th>
+                <th className="px-4 py-3">UID</th>
+                <th className="px-4 py-3">Official name</th>
+                <th className="px-4 py-3">Conf.</th>
+                <th className="px-4 py-3 text-right">Cost</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <RowView
+                  key={r.company}
+                  row={r}
+                  open={open === r.company}
+                  onToggle={() =>
+                    setOpen(open === r.company ? null : r.company)
+                  }
+                />
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      <footer className="mt-10 text-xs text-neutral-400">
+        Created with AI assistance.
+      </footer>
+    </main>
+  );
+}
+
+function RowView({
+  row,
+  open,
+  onToggle,
+}: {
+  row: Row;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const conf = row.result?.confidence ?? 0;
+  const confColor =
+    conf >= 0.9
+      ? "bg-emerald-100 text-emerald-800"
+      : conf >= 0.7
+        ? "bg-[var(--color-mustard)]/30 text-neutral-800"
+        : "bg-red-100 text-red-800";
+
+  return (
+    <>
+      <tr className="border-t border-neutral-200">
+        <td className="px-4 py-3 font-medium">{row.company}</td>
+        <td className="px-4 py-3 font-mono">
+          {row.status === "running" && (
+            <span className="text-neutral-400">researching …</span>
+          )}
+          {row.result?.uid ?? (row.status === "done" ? "—" : "")}
+        </td>
+        <td className="px-4 py-3 text-neutral-600">
+          {row.result?.official_name}
+          {row.result?.domicile ? `, ${row.result.domicile}` : ""}
+        </td>
+        <td className="px-4 py-3">
+          {row.result && (
+            <span className={`rounded px-2 py-1 text-xs font-bold ${confColor}`}>
+              {conf.toFixed(2)}
+            </span>
+          )}
+        </td>
+        <td className="px-4 py-3 text-right font-mono text-xs text-neutral-500">
+          {row.cost ? formatUsd(row.cost.total_usd) : ""}
+        </td>
+        <td className="px-4 py-3 text-right">
+          <button
+            onClick={onToggle}
+            className="text-xs text-neutral-500 underline"
+          >
+            {open ? "Hide details" : "Details"}
+          </button>
+        </td>
+      </tr>
+      {open && (
+        <tr className="border-t border-neutral-100 bg-neutral-50">
+          <td colSpan={6} className="px-4 py-4">
+            {row.result && (
+              <div className="mb-4">
+                <p className="text-sm text-neutral-700">
+                  {row.result.reasoning}
+                </p>
+                {row.result.sources.length > 0 && (
+                  <ul className="mt-2 space-y-1 text-xs">
+                    {row.result.sources.map((s) => (
+                      <li key={s}>
+                        <a
+                          href={s}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-neutral-500 underline"
+                        >
+                          {s}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            {row.cost && <CostBreakdown cost={row.cost} />}
+
+            <details open={!row.result}>
+              <summary className="cursor-pointer text-xs font-semibold text-neutral-500">
+                Agent steps ({row.log.length})
+              </summary>
+              <ol className="mt-2 space-y-1 font-mono text-xs text-neutral-600">
+                {row.log.map((l, i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="shrink-0 font-bold text-[var(--color-mustard-dark)]">
+                      {l.kind}
+                    </span>
+                    <span className="whitespace-pre-wrap">{l.text}</span>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function CostSummary({ rows }: { rows: Row[] }) {
+  const total = rows
+    .map((r) => r.cost)
+    .filter((c): c is Cost => Boolean(c))
+    .reduce(addCost, emptyCost());
+  const priced = rows.filter((r) => r.cost).length;
+  if (priced === 0) return null;
+
+  return (
+    <section className="mb-4 flex flex-wrap items-baseline gap-x-8 gap-y-2 rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm">
+      <div>
+        <span className="text-neutral-500">Total </span>
+        <span className="font-bold">{formatUsd(total.total_usd)}</span>
+        <span className="text-neutral-400">
+          {" "}
+          for {priced} {priced === 1 ? "company" : "companies"}
+        </span>
+      </div>
+      <div className="text-neutral-500">
+        Ø per company{" "}
+        <span className="font-semibold text-neutral-700">
+          {formatUsd(total.total_usd / priced)}
+        </span>
+      </div>
+      <div className="text-neutral-500">
+        Claude{" "}
+        <span className="font-semibold text-neutral-700">
+          {formatUsd(total.model_usd)}
+        </span>
+      </div>
+      <div className="text-neutral-500">
+        Firecrawl{" "}
+        <span className="font-semibold text-neutral-700">
+          {formatUsd(total.firecrawl_usd)}
+        </span>
+        <span className="text-neutral-400">
+          {" "}
+          ({total.firecrawl_credits} credits)
+        </span>
+      </div>
+    </section>
+  );
+}
+
+function CostBreakdown({ cost }: { cost: Cost }) {
+  const cells: [string, string][] = [
+    ["Input tokens", cost.input_tokens.toLocaleString("en-US")],
+    ["Output tokens", cost.output_tokens.toLocaleString("en-US")],
+    ["Claude (opus-5)", formatUsd(cost.model_usd)],
+    [
+      "Firecrawl",
+      `${cost.firecrawl_searches} search / ${cost.firecrawl_scrapes} scrape = ${cost.firecrawl_credits} credits`,
+    ],
+    ["Firecrawl cost", formatUsd(cost.firecrawl_usd)],
+    ["Total", formatUsd(cost.total_usd)],
+  ];
+
+  return (
+    <dl className="mb-4 grid grid-cols-2 gap-x-6 gap-y-1 border-y border-neutral-200 py-3 text-xs sm:grid-cols-3">
+      {cells.map(([k, v]) => (
+        <div key={k} className="flex justify-between gap-2">
+          <dt className="text-neutral-500">{k}</dt>
+          <dd className="font-mono font-semibold text-neutral-700">{v}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
