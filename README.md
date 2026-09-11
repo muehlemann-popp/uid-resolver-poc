@@ -77,6 +77,31 @@ curl -N -X POST http://localhost:3000/api/resolve \
 The response is an NDJSON stream (`start`, `thinking`, `tool_call`,
 `tool_result`, `cost`, `result`, `done`).
 
+### Model switch
+
+The UI lets you pick the model per run; the API takes an optional `model` field
+(`claude-opus-5` or `claude-sonnet-5`, anything else falls back to Opus 5):
+
+```bash
+curl -N -X POST http://localhost:3000/api/resolve \
+  -H 'Content-Type: application/json' \
+  -d '{"companies":["Muehlemann und Pop Zuerich"],"model":"claude-sonnet-5"}'
+```
+
+The cost display is priced per model, and each result records which model
+produced it - so a side-by-side comparison is one run apart.
+
+First measurements on the same inputs:
+
+| Input | Opus 5 | Sonnet 5 |
+|---|---|---|
+| `"Muehlemann und Pop Zuerich"` | CHE-115.471.001, conf. 0.95, $0.0503 | CHE-115.471.001, conf. 0.92, $0.0188 |
+| `"Ringier Axel Springer Schweitz"` | CHE-296.827.326, conf. 0.88, $0.1037 | CHE-296.827.326, conf. 0.90, $0.0362 |
+
+Same UIDs at roughly a third of the cost, including the rename case. That is two
+data points, not a verdict - build the evaluation set (point 6 below) before
+making Sonnet the default.
+
 ### Cost display
 
 Every run is priced live in the UI: per-row cost, a total bar above the table
@@ -85,8 +110,9 @@ breakdown in the detail panel. Costs also go into the CSV export.
 
 Pricing basis (`src/lib/cost.ts`):
 
-- **Claude Opus 5** $5.00 / $25.00 per 1M input / output tokens, taken from the
-  actual `usage` of every API response, not estimated.
+- **Claude Opus 5** $5.00 / $25.00 and **Claude Sonnet 5** $2.00 / $10.00 per 1M
+  input / output tokens, taken from the actual `usage` of every API response,
+  not estimated.
 - **Firecrawl** 2 credits per search (2 per 10 results, and we cap at 10),
   1 credit per scrape. A credit has no fixed USD price - the default assumes the
   Standard plan (100k credits / $83 per month = $0.00083). Set
@@ -98,7 +124,7 @@ Pricing basis (`src/lib/cost.ts`):
 |---|---|
 | `src/lib/firecrawl.ts` | Minimal Firecrawl v2 client (`/search`, `/scrape`) |
 | `src/lib/agent.ts` | System prompt, tool definitions, agent loop, UID normalisation |
-| `src/lib/cost.ts` | Token/credit accounting and USD pricing |
+| `src/lib/cost.ts` | Model registry, token/credit accounting and USD pricing |
 | `src/app/api/resolve/route.ts` | NDJSON streaming endpoint |
 | `src/app/page.tsx` | UI |
 | `src/proxy.ts`, `src/app/login/` | Shared-password access gate |

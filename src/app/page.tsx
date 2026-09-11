@@ -2,7 +2,15 @@
 
 import { useRef, useState } from "react";
 import type { AgentEvent, ResolveResult } from "@/lib/agent";
-import { addCost, emptyCost, formatUsd, type Cost } from "@/lib/cost";
+import {
+  addCost,
+  DEFAULT_MODEL,
+  emptyCost,
+  formatUsd,
+  MODELS,
+  type Cost,
+  type ModelId,
+} from "@/lib/cost";
 
 type LogEntry = { kind: string; text: string };
 type Row = {
@@ -25,6 +33,7 @@ const EXAMPLES = [
 
 export default function Home() {
   const [input, setInput] = useState(EXAMPLES);
+  const [model, setModel] = useState<ModelId>(DEFAULT_MODEL);
   const [rows, setRows] = useState<Row[]>([]);
   const [running, setRunning] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
@@ -50,7 +59,7 @@ export default function Home() {
       const res = await fetch("/api/resolve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companies }),
+        body: JSON.stringify({ companies, model }),
         signal: abort.current.signal,
       });
       if (!res.ok || !res.body) throw new Error(await res.text());
@@ -125,7 +134,7 @@ export default function Home() {
 
   function copyCsv() {
     const csv = [
-      "Input;UID;Official name;Domicile;Confidence;Cost USD;Rationale",
+      "Input;UID;Official name;Domicile;Confidence;Model;Cost USD;Rationale",
       ...rows.map((r) =>
         [
           r.company,
@@ -133,6 +142,7 @@ export default function Home() {
           r.result?.official_name ?? "",
           r.result?.domicile ?? "",
           r.result?.confidence?.toFixed(2) ?? "",
+          r.cost?.model ?? "",
           r.cost ? r.cost.total_usd.toFixed(5) : "",
           (r.result?.reasoning ?? "").replace(/[\r\n;]+/g, " "),
         ].join(";"),
@@ -165,7 +175,39 @@ export default function Home() {
           spellCheck={false}
           className="w-full resize-y rounded border border-neutral-300 p-3 font-mono text-sm outline-none focus:border-[var(--color-mustard)]"
         />
-        <div className="mt-3 flex items-center gap-3">
+        <fieldset className="mt-4" disabled={running}>
+          <legend className="mb-2 text-sm font-semibold text-neutral-700">
+            Model
+          </legend>
+          <div className="flex flex-wrap gap-2">
+            {MODELS.map((m) => (
+              <label
+                key={m.id}
+                title={m.hint}
+                className={`cursor-pointer rounded border px-3 py-2 text-sm transition ${
+                  model === m.id
+                    ? "border-[var(--color-mustard)] bg-[var(--color-mustard)]/20 font-bold"
+                    : "border-neutral-300 hover:border-neutral-400"
+                } ${running ? "cursor-not-allowed opacity-60" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="model"
+                  value={m.id}
+                  checked={model === m.id}
+                  onChange={() => setModel(m.id)}
+                  className="sr-only"
+                />
+                {m.label}
+                <span className="ml-2 font-normal text-neutral-500">
+                  {m.hint}
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <div className="mt-4 flex items-center gap-3">
           <button
             onClick={run}
             disabled={running}
@@ -338,6 +380,15 @@ function CostSummary({ rows }: { rows: Row[] }) {
   const priced = rows.filter((r) => r.cost).length;
   if (priced === 0) return null;
 
+  const modelsUsed = [
+    ...new Set(
+      rows
+        .map((r) => r.cost?.model)
+        .filter(Boolean)
+        .map((id) => MODELS.find((m) => m.id === id)?.label ?? id),
+    ),
+  ].join(" + ");
+
   return (
     <section className="mb-4 flex flex-wrap items-baseline gap-x-8 gap-y-2 rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm">
       <div>
@@ -355,7 +406,7 @@ function CostSummary({ rows }: { rows: Row[] }) {
         </span>
       </div>
       <div className="text-neutral-500">
-        Claude{" "}
+        {modelsUsed}{" "}
         <span className="font-semibold text-neutral-700">
           {formatUsd(total.model_usd)}
         </span>
@@ -378,7 +429,10 @@ function CostBreakdown({ cost }: { cost: Cost }) {
   const cells: [string, string][] = [
     ["Input tokens", cost.input_tokens.toLocaleString("en-US")],
     ["Output tokens", cost.output_tokens.toLocaleString("en-US")],
-    ["Claude (opus-5)", formatUsd(cost.model_usd)],
+    [
+      `Claude (${MODELS.find((m) => m.id === cost.model)?.label ?? cost.model})`,
+      formatUsd(cost.model_usd),
+    ],
     [
       "Firecrawl",
       `${cost.firecrawl_searches} search / ${cost.firecrawl_scrapes} scrape = ${cost.firecrawl_credits} credits`,

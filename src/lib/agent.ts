@@ -1,8 +1,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { firecrawlScrape, firecrawlSearch } from "./firecrawl";
-import { emptyCost, priceCost, type Cost } from "./cost";
+import {
+  DEFAULT_MODEL,
+  emptyCost,
+  priceCost,
+  type Cost,
+  type ModelId,
+} from "./cost";
 
-const MODEL = "claude-opus-5";
 const MAX_ITERATIONS = 12;
 
 export type AgentEvent =
@@ -167,6 +172,7 @@ export function normalizeUid(raw: string | null | undefined): string | null {
 export async function resolveCompany(
   company: string,
   emit: (e: AgentEvent) => void,
+  model: ModelId = DEFAULT_MODEL,
 ): Promise<ResolveResult> {
   const client = new Anthropic();
   const messages: Anthropic.MessageParam[] = [
@@ -181,15 +187,15 @@ export async function resolveCompany(
 
   emit({ type: "start", company });
 
-  const cost = emptyCost();
+  const cost = emptyCost(model);
   const publishCost = () => {
-    priceCost(cost, MODEL);
+    priceCost(cost);
     emit({ type: "cost", company, cost: { ...cost } });
   };
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const response = await client.messages.create({
-      model: MODEL,
+      model,
       max_tokens: 16000,
       system: SYSTEM,
       tools: TOOLS,
@@ -243,7 +249,7 @@ export async function resolveCompany(
         sources: Array.isArray(input.sources)
           ? input.sources.filter((s) => typeof s === "string" && /^https?:\/\//.test(s))
           : [],
-        cost: priceCost(cost, MODEL),
+        cost: priceCost(cost),
       };
       emit({ type: "result", company, result });
       return result;
@@ -315,7 +321,7 @@ export async function resolveCompany(
     reasoning:
       "Aborted: the agent hit the iteration limit without delivering a result.",
     sources: [],
-    cost: priceCost(cost, MODEL),
+    cost: priceCost(cost),
   };
   emit({ type: "result", company, result: fallback });
   return fallback;

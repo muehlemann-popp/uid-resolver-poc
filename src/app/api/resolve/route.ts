@@ -1,16 +1,18 @@
 import { NextRequest } from "next/server";
 import { resolveCompany, type AgentEvent } from "@/lib/agent";
+import { DEFAULT_MODEL, isModelId } from "@/lib/cost";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
  * POST /api/resolve
- * Body: { companies: string[] }
+ * Body: { companies: string[], model?: "claude-opus-5" | "claude-sonnet-5" }
  * Response: NDJSON stream - one AgentEvent per line (plus { type: "done" }).
  */
 export async function POST(req: NextRequest) {
-  const body = (await req.json()) as { companies?: string[] };
+  const body = (await req.json()) as { companies?: string[]; model?: string };
+  const model = isModelId(body.model) ? body.model : DEFAULT_MODEL;
   const companies = (body.companies ?? [])
     .map((c) => c.trim())
     .filter(Boolean)
@@ -31,7 +33,7 @@ export async function POST(req: NextRequest) {
 
       for (const company of companies) {
         try {
-          await resolveCompany(company, send);
+          await resolveCompany(company, send, model);
         } catch (err) {
           send({
             type: "error",
