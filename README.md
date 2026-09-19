@@ -20,10 +20,20 @@ Company name (possibly misspelled)
   -> submit_result  { uid, official_name, domicile, employees, confidence, reasoning, sources }
 ```
 
-Second task in the same run: the **number of employees**, as the source states
-it (a number or a range, with the year if given). The Claude agent is told to
-spend at most 1-2 extra searches on it; the Jev pipeline adds one fixed search
-and one more choice question to its single decision request.
+Second task in the same run: the **number of employees**, returned as
+structured data by every model:
+
+```ts
+employees: { count: number | null; min: number | null; max: number | null;
+             year: number | null; fte: boolean; source: string } | null
+```
+
+`count` is set for an exact figure (then `min = max = count`), a bracket such
+as LinkedIn's "11-50" comes back as `min`/`max` with `count: null`. The Claude
+agent fills this via the `submit_result` schema (an invalid call is handed back
+to the model as a tool error so it corrects it); the Jev pipeline adds one fixed
+search, extracts candidates by regex and lets Jev pick one. The UI shows it as
+"6,655 (2025)" and the CSV export carries the individual fields.
 
 The agent decides for itself how many searches it needs; 2-6 tool calls is
 typical. Every step is streamed to the UI as an NDJSON event so you can follow
@@ -198,8 +208,8 @@ What the numbers say:
 Known limits of the Jev variant: fixed 4-query plan, no adaptive re-search;
 rationale is templated from the probabilities; official name and town come
 from the page title (Moneyhouse/North Data titles work well, register pages
-have none); headcount is the best regex hit Jev accepts, without year or FTE
-qualifier; confidence = pick x name-match, capped by source tier (register 1.0,
+have none); headcount is the best regex hit Jev accepts, year and FTE flag are
+taken from the surrounding text; confidence = pick x name-match, capped by source tier (register 1.0,
 directory 0.94, other 0.85).
 
 ### Cost display
@@ -231,6 +241,7 @@ Pricing basis (`src/lib/cost.ts`):
 | `src/lib/jev.ts` | TypeSafe SDK wrapper with usage accounting |
 | `src/lib/jev-agent.ts` | Code-driven Jev pipeline: search, extract, scrape fallback, decide, compose |
 | `src/lib/uid.ts` | UID normalisation and text sanitising shared by both pipelines |
+| `src/lib/employees.ts` | Structured headcount type, constructor and formatter |
 | `src/lib/cost.ts` | Model registry, token/credit accounting, USD pricing, duration |
 | `src/app/api/resolve/route.ts` | NDJSON streaming endpoint |
 | `src/app/page.tsx` | UI |
@@ -304,4 +315,4 @@ the question wording in `src/lib/jev-agent.ts`.
 
 ---
 Created with AI assistance.
-Last updated: 2026-09-19 - Commit: 746ea08
+Last updated: 2026-09-19 - Commit: a2e56ac

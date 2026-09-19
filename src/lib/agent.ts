@@ -4,6 +4,8 @@ import { runToolAgent, terminalTool } from "./tool-agent";
 import { resolveWithJev } from "./jev-agent";
 import { normalizeUid, sanitizeText } from "./uid";
 export { normalizeUid, sanitizeText } from "./uid";
+import { makeEmployees, type Employees } from "./employees";
+export type { Employees } from "./employees";
 import {
   DEFAULT_MODEL,
   emptyCost,
@@ -30,8 +32,8 @@ export type ResolveResult = {
   official_name: string;
   /** Registered seat (town), if known. */
   domicile: string;
-  /** Number of employees as stated by the source, e.g. "10-49" or "19,000 (2024)". Empty if unknown. */
-  employees: string;
+  /** Structured headcount, or null if not found. */
+  employees: Employees | null;
   /** 0.0 - 1.0 */
   confidence: number;
   /** Rationale: how it was found, or why it wasn't. */
@@ -70,10 +72,12 @@ How to work:
    "not found" once several searches across name variants come up empty.
 5. Second task: find the number of employees (headcount) of the same company.
    Typical sources: Moneyhouse ("Mitarbeiter"), LinkedIn ("11-50 employees"), the
-   company website or annual report, Wikipedia. Report it as the source states
-   it (a number or a range, e.g. "10-49" or "19,000"), add the reference year if
-   given, and leave it empty if you find nothing solid. Spend at most 1-2 extra
-   searches on this; the UID has priority.
+   company website or annual report, Wikipedia. Report it as structured data:
+   an exact figure as count (min = max = count), a bracket such as "11-50" as
+   min/max with count null, the reference year if stated, fte = true only when
+   the source says full-time equivalents, and the source URL. Prefer persons
+   over FTE, and the most recent figure. Return null if you find nothing solid.
+   Spend at most 1-2 extra searches on this; the UID has priority.
 6. Always finish by calling submit_result. Never guess a UID - if you have no solid
    source, return an empty uid.
 
@@ -90,6 +94,12 @@ Confidence guidance:
 Write the rationale in English, concise and factual (2-4 sentences).
 Work efficiently: roughly 8 tool calls per company at most.`;
 
+/** Models occasionally send "6655" or omit a field; be lenient, the type stays strict downstream. */
+const intOrNull = z.preprocess(
+  (v) => (v === "" || v === undefined ? null : typeof v === "string" ? Number(v.replace(/[^\d.-]/g, "")) : v),
+  z.number().int().nullable(),
+);
+
 const submitResult = terminalTool({
   name: "submit_result",
   description: "Submit the final result. Must be called exactly once, at the end.",
@@ -98,8 +108,16 @@ const submitResult = terminalTool({
     official_name: z.string().describe("Official company name per the source, else empty"),
     domicile: z.string().describe("Registered seat/town, else empty"),
     employees: z
-      .string()
-      .describe('Number of employees as stated by the source, e.g. "10-49" or "19,000 (2024)"; empty if unknown'),
+      .object({
+        count: intOrNull.describe("Exact/approximate headcount; null when only a range is known"),
+        min: intOrNull.describe("Lower bound of the range, or equal to count"),
+        max: intOrNull.describe("Upper bound of the range, or equal to count"),
+        year: intOrNull.describe("Reference year if the source states one"),
+        fte: z.boolean().nullish().describe("true if the figure is full-time equivalents"),
+        source: z.string().nullish().describe("URL the figure was taken from"),
+      })
+      .nullish()
+      .describe("Number of employees as structured data; null if not found"),
     confidence: z.number().describe("0.0 to 1.0"),
     reasoning: z.string().describe("Rationale in English"),
     sources: z.array(z.string()).describe("Source URLs used"),
@@ -164,7 +182,13 @@ async function resolveWithClaude(
         uid: normalizeUid(run.output.uid),
         official_name: sanitizeText(run.output.official_name),
         domicile: sanitizeText(run.output.domicile),
-        employees: sanitizeText(run.output.employees),
+        employees: run.output.employees
+          ? makeEmployees(run.output.employees.min ?? run.output.employees.count, run.output.employees.max ?? run.output.employees.count, {
+              year: run.output.employees.year,
+              fte: run.output.employees.fte ?? false,
+              source: run.output.employees.source ?? "",
+            })
+          : null,
         confidence: Math.min(Math.max(Number(run.output.confidence) || 0, 0), 1),
         reasoning: run.output.reasoning,
         sources: run.output.sources.filter((s) => /^https?:\/\//.test(s)),
@@ -174,7 +198,7 @@ async function resolveWithClaude(
         uid: null,
         official_name: "",
         domicile: "",
-        employees: "",
+        employees: null,
         confidence: 0,
         reasoning:
           run.stopReason === "max_iterations"

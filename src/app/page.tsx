@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { AgentEvent, ResolveResult } from "@/lib/agent";
+import { formatEmployees } from "@/lib/employees";
 import {
   addCost,
   DEFAULT_MODEL,
@@ -135,14 +136,19 @@ export default function Home() {
 
   function copyCsv() {
     const csv = [
-      "Input;UID;Official name;Domicile;Employees;Confidence;Model;Cost USD;Duration s;Rationale",
+      "Input;UID;Official name;Domicile;Employees;Employees min;Employees max;Employees year;FTE;Employees source;Confidence;Model;Cost USD;Duration s;Rationale",
       ...rows.map((r) =>
         [
           r.company,
           r.result?.uid ?? "",
           r.result?.official_name ?? "",
           r.result?.domicile ?? "",
-          r.result?.employees ?? "",
+          r.result?.employees?.count ?? "",
+          r.result?.employees?.min ?? "",
+          r.result?.employees?.max ?? "",
+          r.result?.employees?.year ?? "",
+          r.result?.employees ? (r.result.employees.fte ? "1" : "0") : "",
+          r.result?.employees?.source ?? "",
           r.result?.confidence?.toFixed(2) ?? "",
           r.cost?.model ?? "",
           r.cost ? r.cost.total_usd.toFixed(5) : "",
@@ -310,7 +316,11 @@ function RowView({
           {row.result?.domicile ? `, ${row.result.domicile}` : ""}
         </td>
         <td className="px-4 py-3 text-right font-mono text-xs text-neutral-600">
-          {row.result?.employees}
+          {row.result?.employees && (
+            <span title={row.result.employees.source}>
+              {formatEmployees(row.result.employees)}
+            </span>
+          )}
         </td>
         <td className="px-4 py-3">
           {row.result && (

@@ -17,6 +17,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
+import { ToolError } from "@anthropic-ai/sdk/lib/tools/ToolError";
 import type { BetaRunnableTool } from "@anthropic-ai/sdk/lib/tools/BetaRunnableTool";
 import * as z from "zod";
 
@@ -39,8 +40,8 @@ export type ToolAgentEvent =
 export type TerminalTool<Output> = {
   tool: BetaRunnableTool<unknown>;
   name: string;
-  /** Validates the tool_use arguments; returns null when they don't fit. */
-  parse: (input: unknown) => Output | null;
+  /** Validates the tool_use arguments; returns the parsed output or the validation error. */
+  parse: (input: unknown) => { output: Output } | { error: string };
 };
 
 export function terminalTool<Schema extends z.ZodType>(options: {
@@ -48,19 +49,28 @@ export function terminalTool<Schema extends z.ZodType>(options: {
   description: string;
   schema: Schema;
 }): TerminalTool<z.infer<Schema>> {
+  const parse = (input: unknown): { output: z.infer<Schema> } | { error: string } => {
+    const parsed = options.schema.safeParse(input);
+    if (parsed.success) return { output: parsed.data as z.infer<Schema> };
+    return {
+      error: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; "),
+    };
+  };
   return {
     name: options.name,
-    parse: (input) => {
-      const parsed = options.schema.safeParse(input);
-      return parsed.success ? (parsed.data as z.infer<Schema>) : null;
-    },
-    // `run` is a formality: runToolAgent breaks out of the loop as soon as the
-    // call is seen, so this only fires if the tool is used outside that path.
+    parse,
+    // runToolAgent returns as soon as a VALID call is seen, so `run` only fires
+    // for an invalid one: it hands the validation error back to the model as an
+    // is_error tool result, and the loop continues so the model can fix it.
     tool: betaZodTool({
       name: options.name,
       description: options.description,
       inputSchema: options.schema,
-      run: async () => "Result recorded.",
+      run: async (input) => {
+        const r = parse(input);
+        if ("error" in r) throw new ToolError(`Invalid ${options.name} arguments: ${r.error}`);
+        return "Result recorded.";
+      },
     }) as BetaRunnableTool<unknown>,
   };
 }
@@ -129,12 +139,15 @@ export async function runToolAgent<Output>(options: {
       (b) => b.type === "tool_use" && b.name === options.terminal.name,
     );
     if (finished && finished.type === "tool_use") {
-      // Break before the runner executes the tool and spends another request.
-      const output = options.terminal.parse(finished.input);
-      if (output !== null) {
-        return { output, stopReason: "terminal_tool", usage };
+      const parsed = options.terminal.parse(finished.input);
+      if ("output" in parsed) {
+        // Return before the runner executes the tool and spends another request.
+        return { output: parsed.output, stopReason: "terminal_tool", usage };
       }
-      return { output: null, stopReason: "no_terminal_call", usage };
+      // Invalid arguments: let the runner execute the tool, which reports the
+      // error back to the model, and keep looping so it can correct the call.
+      options.onEvent({ type: "thinking", text: `${options.terminal.name} rejected: ${parsed.error}` });
+      continue;
     }
 
     // Server tools can park a turn; the runner only resumes after a client

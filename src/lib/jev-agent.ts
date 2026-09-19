@@ -20,6 +20,7 @@ import { normalizeUid, sanitizeText } from "./uid";
 import { emptyCost, priceCost, type ModelId } from "./cost";
 import { firecrawlScrape, firecrawlSearch, type SearchResult } from "./firecrawl";
 import { ask } from "./jev";
+import { formatEmployees, makeEmployees, type Employees } from "./employees";
 
 const SEARCH_LIMIT = 5;
 const CONTEXT_CHARS = 300;
@@ -137,7 +138,7 @@ const HEADCOUNT_RES = [
   new RegExp(String.raw`\b(?:${KW})\b[^\d\n]{0,25}?${QUAL}(${NUM})(?:\s*(?:-|–|bis|to|à)\s*(${NUM}))?\+?`, "gi"),
 ];
 
-type HeadcountCandidate = { id: string; value: string; url: string; domain: string; context: string };
+type HeadcountCandidate = { id: string; value: string; employees: Employees; url: string; domain: string; context: string };
 
 /** Regex pass for employee numbers; one candidate per distinct value, best-tier source first. */
 function extractHeadcounts(sources: TextSource[]): HeadcountCandidate[] {
@@ -152,28 +153,30 @@ function extractHeadcounts(sources: TextSource[]): HeadcountCandidate[] {
         // Years, postcodes and UID fragments are not headcounts.
         const isYear = (n: string) => /^(19|20)\d\d$/.test(n);
         if (Number(lo) < 1 || Number(lo) > 5_000_000 || isYear(lo) || (hi && Number(hi) < Number(lo))) continue;
-        const value = hi ? `${Number(lo).toLocaleString("en-US")}-${Number(hi).toLocaleString("en-US")}` : Number(lo).toLocaleString("en-US");
         const start = Math.max(0, m.index - 150);
         const end = Math.min(src.text.length, m.index + m[0].length + 150);
+        const context = src.text.slice(start, end).replace(/\s+/g, " ").trim();
+        const near = src.text.slice(Math.max(0, m.index - 60), m.index + m[0].length + 60);
+        const year = /\b(19[89]\d|20[0-4]\d)\b/.exec(near)?.[1];
+        const employees = makeEmployees(Number(lo), hi ? Number(hi) : null, {
+          year: year ? Number(year) : null,
+          fte: /\bFTEs?\b|Vollzeit|full-time equivalent|équivalents? plein/i.test(near),
+          source: src.url,
+        });
+        if (!employees) continue;
+        const value = formatEmployees(employees);
         const domain = domainOf(src.url);
         const tier = tierOf(domain);
         const prev = seen.get(value);
         if (prev && prev.tier <= tier) continue;
-        seen.set(value, {
-          id: "",
-          value,
-          url: src.url,
-          domain,
-          tier,
-          context: src.text.slice(start, end).replace(/\s+/g, " ").trim(),
-        });
+        seen.set(value, { id: "", value, employees, url: src.url, domain, tier, context });
       }
     }
   }
   return [...seen.values()]
     .sort((a, b) => a.tier - b.tier)
     .slice(0, MAX_CANDIDATES)
-    .map((c, i) => ({ id: `e${i + 1}`, value: c.value, url: c.url, domain: c.domain, context: c.context }));
+    .map((c, i) => ({ id: `e${i + 1}`, value: c.value, employees: c.employees, url: c.url, domain: c.domain, context: c.context }));
 }
 
 /**
@@ -422,7 +425,7 @@ export async function resolveWithJev(
       uid: null,
       official_name: "",
       domicile: "",
-      employees: "",
+      employees: null,
       confidence: 0,
       reasoning: `No CHE number found in ${hits.length} search hits${scraped ? ` and ${scraped} scraped page(s)` : ""} for "${company}".`,
       sources: hits.slice(0, 3).map((h) => h.url),
@@ -461,7 +464,7 @@ export async function resolveWithJev(
       uid: null,
       official_name: "",
       domicile: "",
-      employees: employees?.value ?? "",
+      employees: employees?.employees ?? null,
       confidence: 0,
       reasoning:
         `Jev chose "none" (${none.toFixed(2)}) among ${candidates.length} candidate(s) for "${company}"` +
@@ -498,7 +501,7 @@ export async function resolveWithJev(
     uid: winner.c.uid,
     official_name: name,
     domicile: town,
-    employees: employees?.value ?? "",
+    employees: employees?.employees ?? null,
     confidence: Number(confidence.toFixed(2)),
     reasoning: parts.join(" "),
     sources: [
