@@ -15,7 +15,7 @@ export default async function LoginPage({
         className="w-full max-w-sm rounded-lg border border-neutral-200 bg-white p-8"
       >
         <h1 className="text-2xl font-extrabold tracking-tight text-neutral-800">
-          UID Resolver
+          Swiss Company Resolver
         </h1>
         <p className="mt-1 mb-6 text-sm text-neutral-500">
           Proof of concept - password protected.
