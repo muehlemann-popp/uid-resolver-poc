@@ -1,4 +1,4 @@
-# UID Resolver (Proof of Concept)
+# Swiss Company Resolver (Proof of Concept)
 
 An agent built on the **Anthropic SDK** (Claude Opus 5 / Sonnet 5) + **Firecrawl**
 that maps misspelled company names to the Swiss company identification number

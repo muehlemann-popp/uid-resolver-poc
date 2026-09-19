@@ -5,7 +5,7 @@ import "./globals.css";
 const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
 
 export const metadata: Metadata = {
-  title: "UID Resolver - PoC",
+  title: "Swiss Company Resolver - PoC",
   description:
     "Agent that maps misspelled company names to the Swiss UID (CHE number).",
 };
