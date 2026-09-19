@@ -6,6 +6,9 @@
  *   claude-sonnet-5  input $2.00 | output $10.00
  *   cache read = 0.1x input, cache write = 1.25x input
  *
+ * Jev (TypeSafe AI "System One" decision model, docs.typesafe.ai/pricing):
+ *   jev-latest       input $0.042 | output free (the model emits no text)
+ *
  * Firecrawl credit costs (docs.firecrawl.dev/billing):
  *   /search  2 credits per 10 results, rounded up  -> 2 credits at our limit of <= 10
  *   /scrape  1 credit per page
@@ -18,6 +21,7 @@
 export const MODEL_PRICING = {
   "claude-opus-5": { input: 5.0, output: 25.0 },
   "claude-sonnet-5": { input: 2.0, output: 10.0 },
+  "jev-latest": { input: 0.042, output: 0 },
 } as const;
 
 export type ModelId = keyof typeof MODEL_PRICING;
@@ -32,6 +36,11 @@ export const MODELS: { id: ModelId; label: string; hint: string }[] = [
     id: "claude-sonnet-5",
     label: "Sonnet 5",
     hint: "$2 / $10 per 1M tokens - ~2.5x cheaper, worth measuring",
+  },
+  {
+    id: "jev-latest",
+    label: "Jev 1.13",
+    hint: "$0.042 / 1M input, ~100 ms per decision - code-driven pipeline",
   },
 ];
 
@@ -58,6 +67,10 @@ export type Cost = {
   firecrawl_credits: number;
   firecrawl_usd: number;
   total_usd: number;
+  /** Number of TypeSafe /systemone requests (0 for Claude runs). */
+  jev_requests: number;
+  /** Wall-clock time of the run, start to result. */
+  duration_ms: number;
 };
 
 export function emptyCost(model: ModelId = DEFAULT_MODEL): Cost {
@@ -73,6 +86,8 @@ export function emptyCost(model: ModelId = DEFAULT_MODEL): Cost {
     firecrawl_credits: 0,
     firecrawl_usd: 0,
     total_usd: 0,
+    jev_requests: 0,
+    duration_ms: 0,
   };
 }
 
@@ -105,6 +120,8 @@ export function addCost(a: Cost, b: Cost): Cost {
     firecrawl_credits: a.firecrawl_credits + b.firecrawl_credits,
     firecrawl_usd: a.firecrawl_usd + b.firecrawl_usd,
     total_usd: a.total_usd + b.total_usd,
+    jev_requests: a.jev_requests + b.jev_requests,
+    duration_ms: a.duration_ms + b.duration_ms,
   };
 }
 
@@ -114,4 +131,11 @@ export function formatUsd(usd: number): string {
   if (usd < 0.0001) return "<$0.0001";
   if (usd < 1) return `$${usd.toFixed(4)}`;
   return `$${usd.toFixed(2)}`;
+}
+
+/** "12.3 s" / "850 ms" */
+export function formatDuration(ms: number): string {
+  if (!ms) return "";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
 }

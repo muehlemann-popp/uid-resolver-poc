@@ -1,5 +1,9 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { firecrawlScrape, firecrawlSearch } from "./firecrawl";
+import * as z from "zod";
+import { firecrawlTools } from "./firecrawl-tools";
+import { runToolAgent, terminalTool } from "./tool-agent";
+import { resolveWithJev } from "./jev-agent";
+import { normalizeUid, sanitizeText } from "./uid";
+export { normalizeUid, sanitizeText } from "./uid";
 import {
   DEFAULT_MODEL,
   emptyCost,
@@ -26,6 +30,8 @@ export type ResolveResult = {
   official_name: string;
   /** Registered seat (town), if known. */
   domicile: string;
+  /** Number of employees as stated by the source, e.g. "10-49" or "19,000 (2024)". Empty if unknown. */
+  employees: string;
   /** 0.0 - 1.0 */
   confidence: number;
   /** Rationale: how it was found, or why it wasn't. */
@@ -62,7 +68,13 @@ How to work:
    application. An empty scrape result there does NOT mean the company does not
    exist - treat it as "no information" and keep searching differently. Only report
    "not found" once several searches across name variants come up empty.
-5. Always finish by calling submit_result. Never guess a UID - if you have no solid
+5. Second task: find the number of employees (headcount) of the same company.
+   Typical sources: Moneyhouse ("Mitarbeiter"), LinkedIn ("11-50 employees"), the
+   company website or annual report, Wikipedia. Report it as the source states
+   it (a number or a range, e.g. "10-49" or "19,000"), add the reference year if
+   given, and leave it empty if you find nothing solid. Spend at most 1-2 extra
+   searches on this; the UID has priority.
+6. Always finish by calling submit_result. Never guess a UID - if you have no solid
    source, return an empty uid.
 
 UID format: CHE-123.456.789 (always normalise to hyphen and dots, even when the
@@ -76,253 +88,102 @@ Confidence guidance:
 - < 0.5: Weak hit - prefer an empty uid plus an explanation.
 
 Write the rationale in English, concise and factual (2-4 sentences).
-Work efficiently: roughly 6 tool calls per company at most.`;
+Work efficiently: roughly 8 tool calls per company at most.`;
 
-const TOOLS: Anthropic.Tool[] = [
-  {
-    name: "firecrawl_search",
-    description:
-      "Web search via Firecrawl. Returns title, URL and text snippet for each hit. " +
-      "Snippets often already contain the CHE number.",
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Search query" },
-        limit: {
-          type: "integer",
-          description: "Number of hits (1-10, default 5)",
-        },
-      },
-      required: ["query"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "firecrawl_scrape",
-    description:
-      "Loads a single web page via Firecrawl and returns it as markdown. " +
-      "For detail pages (Zefix entry, Moneyhouse profile, imprint).",
-    input_schema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "Full URL" },
-      },
-      required: ["url"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "submit_result",
-    description:
-      "Submit the final result. Must be called exactly once, at the end.",
-    strict: true,
-    input_schema: {
-      type: "object",
-      properties: {
-        uid: {
-          type: "string",
-          description:
-            "CHE-123.456.789, or an empty string if no UID was found",
-        },
-        official_name: {
-          type: "string",
-          description: "Official company name per the source, else empty",
-        },
-        domicile: { type: "string", description: "Registered seat/town, else empty" },
-        confidence: { type: "number", description: "0.0 to 1.0" },
-        reasoning: { type: "string", description: "Rationale in English" },
-        sources: {
-          type: "array",
-          items: { type: "string" },
-          description: "Source URLs used",
-        },
-      },
-      required: [
-        "uid",
-        "official_name",
-        "domicile",
-        "confidence",
-        "reasoning",
-        "sources",
-      ],
-      additionalProperties: false,
-    },
-  },
-];
+const submitResult = terminalTool({
+  name: "submit_result",
+  description: "Submit the final result. Must be called exactly once, at the end.",
+  schema: z.object({
+    uid: z.string().describe("CHE-123.456.789, or an empty string if no UID was found"),
+    official_name: z.string().describe("Official company name per the source, else empty"),
+    domicile: z.string().describe("Registered seat/town, else empty"),
+    employees: z
+      .string()
+      .describe('Number of employees as stated by the source, e.g. "10-49" or "19,000 (2024)"; empty if unknown'),
+    confidence: z.number().describe("0.0 to 1.0"),
+    reasoning: z.string().describe("Rationale in English"),
+    sources: z.array(z.string()).describe("Source URLs used"),
+  }),
+});
 
-/**
- * Defensive cleanup: in rare cases the model leaks fragments of its tool
- * serialisation into short string fields. Discard such values.
- */
-function sanitizeText(raw: unknown): string {
-  const text = typeof raw === "string" ? raw.trim() : "";
-  if (!text) return "";
-  if (/[<>]|parameter name=/i.test(text)) return "";
-  return text;
-}
-
-/** CHE123456789 / CHE-123.456.789 MWST / che 123 456 789 -> CHE-123.456.789 */
-export function normalizeUid(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length !== 9) return null;
-  return `CHE-${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}`;
-}
-
+/** Entry point: picks the pipeline by model. Both emit the same events. */
 export async function resolveCompany(
   company: string,
   emit: (e: AgentEvent) => void,
   model: ModelId = DEFAULT_MODEL,
 ): Promise<ResolveResult> {
-  const client = new Anthropic();
-  const messages: Anthropic.MessageParam[] = [
-    {
-      role: "user",
-      content:
-        `Find the Swiss UID (CHE number) for this company name from our database:\n` +
-        `"${company}"\n\n` +
-        `The name may be misspelled.`,
-    },
-  ];
-
   emit({ type: "start", company });
+  if (model === "jev-latest") return resolveWithJev(company, emit, model);
+  return resolveWithClaude(company, emit, model);
+}
 
+async function resolveWithClaude(
+  company: string,
+  emit: (e: AgentEvent) => void,
+  model: ModelId,
+): Promise<ResolveResult> {
+  const started = Date.now();
   const cost = emptyCost(model);
-  const publishCost = () => {
-    priceCost(cost);
-    emit({ type: "cost", company, cost: { ...cost } });
-  };
+  const publishCost = () => emit({ type: "cost", company, cost: priceCost({ ...cost }) });
 
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const response = await client.messages.create({
-      model,
-      max_tokens: 16000,
-      system: SYSTEM,
-      tools: TOOLS,
-      messages,
-      thinking: { type: "adaptive", display: "summarized" },
-    });
+  const tools = firecrawlTools({
+    onCall: (tool) => {
+      if (tool === "firecrawl_search") cost.firecrawl_searches += 1;
+      else cost.firecrawl_scrapes += 1;
+      publishCost();
+    },
+    onResult: (tool, summary) => emit({ type: "tool_result", tool, summary }),
+  });
 
-    cost.input_tokens += response.usage.input_tokens ?? 0;
-    cost.output_tokens += response.usage.output_tokens ?? 0;
-    cost.cache_read_tokens += response.usage.cache_read_input_tokens ?? 0;
-    cost.cache_write_tokens += response.usage.cache_creation_input_tokens ?? 0;
-    publishCost();
-
-    for (const block of response.content) {
-      if (block.type === "thinking" && block.thinking.trim()) {
-        emit({ type: "thinking", text: block.thinking });
+  const run = await runToolAgent({
+    model,
+    system: SYSTEM,
+    prompt:
+      `Find the Swiss UID (CHE number) for this company name from our database:\n` +
+      `"${company}"\n\n` +
+      `The name may be misspelled.`,
+    tools,
+    terminal: submitResult,
+    maxIterations: MAX_ITERATIONS,
+    onEvent: (event) => {
+      if (event.type === "usage") {
+        cost.input_tokens = event.usage.input_tokens;
+        cost.output_tokens = event.usage.output_tokens;
+        cost.cache_read_tokens = event.usage.cache_read_tokens;
+        cost.cache_write_tokens = event.usage.cache_write_tokens;
+        publishCost();
+        return;
       }
-      if (block.type === "text" && block.text.trim()) {
-        emit({ type: "thinking", text: block.text });
+      emit(event);
+    },
+  });
+
+  cost.duration_ms = Date.now() - started;
+  const result: ResolveResult = run.output
+    ? {
+        uid: normalizeUid(run.output.uid),
+        official_name: sanitizeText(run.output.official_name),
+        domicile: sanitizeText(run.output.domicile),
+        employees: sanitizeText(run.output.employees),
+        confidence: Math.min(Math.max(Number(run.output.confidence) || 0, 0), 1),
+        reasoning: run.output.reasoning,
+        sources: run.output.sources.filter((s) => /^https?:\/\//.test(s)),
+        cost: priceCost(cost),
       }
-    }
-
-    if (response.stop_reason !== "tool_use") {
-      // No more tool calls, but no submit_result either -> nudge the model.
-      messages.push({ role: "assistant", content: response.content });
-      messages.push({
-        role: "user",
-        content: "Please deliver the result now via submit_result.",
-      });
-      continue;
-    }
-
-    messages.push({ role: "assistant", content: response.content });
-
-    const toolUses = response.content.filter(
-      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
-    );
-
-    // Final result?
-    const submit = toolUses.find((t) => t.name === "submit_result");
-    if (submit) {
-      const input = submit.input as Omit<ResolveResult, "uid"> & {
-        uid: string;
-      };
-      const result: ResolveResult = {
-        uid: normalizeUid(input.uid),
-        official_name: sanitizeText(input.official_name),
-        domicile: sanitizeText(input.domicile),
-        confidence: Math.min(Math.max(Number(input.confidence) || 0, 0), 1),
-        reasoning: input.reasoning ?? "",
-        sources: Array.isArray(input.sources)
-          ? input.sources.filter((s) => typeof s === "string" && /^https?:\/\//.test(s))
-          : [],
+    : {
+        uid: null,
+        official_name: "",
+        domicile: "",
+        employees: "",
+        confidence: 0,
+        reasoning:
+          run.stopReason === "max_iterations"
+            ? "Aborted: the agent hit the iteration limit without delivering a result."
+            : "Aborted: the agent finished without delivering a usable result.",
+        sources: [],
         cost: priceCost(cost),
       };
-      emit({ type: "result", company, result });
-      return result;
-    }
 
-    const results: Anthropic.ToolResultBlockParam[] = await Promise.all(
-      toolUses.map(async (tu) => {
-        emit({ type: "tool_call", tool: tu.name, input: tu.input });
-        try {
-          if (tu.name === "firecrawl_search") {
-            const { query, limit } = tu.input as {
-              query: string;
-              limit?: number;
-            };
-            cost.firecrawl_searches += 1;
-            const hits = await firecrawlSearch(
-              query,
-              Math.min(Math.max(limit ?? 5, 1), 10),
-            );
-            emit({
-              type: "tool_result",
-              tool: tu.name,
-              summary: `${hits.length} hits for "${query}"`,
-            });
-            return {
-              type: "tool_result" as const,
-              tool_use_id: tu.id,
-              content: JSON.stringify(hits),
-            };
-          }
-          if (tu.name === "firecrawl_scrape") {
-            const { url } = tu.input as { url: string };
-            cost.firecrawl_scrapes += 1;
-            const page = await firecrawlScrape(url);
-            emit({
-              type: "tool_result",
-              tool: tu.name,
-              summary: `${page.markdown.length} chars from ${page.url}`,
-            });
-            return {
-              type: "tool_result" as const,
-              tool_use_id: tu.id,
-              content: JSON.stringify(page),
-            };
-          }
-          throw new Error(`Unknown tool: ${tu.name}`);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          emit({ type: "tool_result", tool: tu.name, summary: `Error: ${message}` });
-          return {
-            type: "tool_result" as const,
-            tool_use_id: tu.id,
-            content: message,
-            is_error: true,
-          };
-        }
-      }),
-    );
-
-    publishCost();
-    messages.push({ role: "user", content: results });
-  }
-
-  const fallback: ResolveResult = {
-    uid: null,
-    official_name: "",
-    domicile: "",
-    confidence: 0,
-    reasoning:
-      "Aborted: the agent hit the iteration limit without delivering a result.",
-    sources: [],
-    cost: priceCost(cost),
-  };
-  emit({ type: "result", company, result: fallback });
-  return fallback;
+  emit({ type: "result", company, result });
+  return result;
 }

@@ -6,6 +6,7 @@ import {
   addCost,
   DEFAULT_MODEL,
   emptyCost,
+  formatDuration,
   formatUsd,
   MODELS,
   type Cost,
@@ -134,16 +135,18 @@ export default function Home() {
 
   function copyCsv() {
     const csv = [
-      "Input;UID;Official name;Domicile;Confidence;Model;Cost USD;Rationale",
+      "Input;UID;Official name;Domicile;Employees;Confidence;Model;Cost USD;Duration s;Rationale",
       ...rows.map((r) =>
         [
           r.company,
           r.result?.uid ?? "",
           r.result?.official_name ?? "",
           r.result?.domicile ?? "",
+          r.result?.employees ?? "",
           r.result?.confidence?.toFixed(2) ?? "",
           r.cost?.model ?? "",
           r.cost ? r.cost.total_usd.toFixed(5) : "",
+          r.cost?.duration_ms ? (r.cost.duration_ms / 1000).toFixed(1) : "",
           (r.result?.reasoning ?? "").replace(/[\r\n;]+/g, " "),
         ].join(";"),
       ),
@@ -158,9 +161,10 @@ export default function Home() {
           UID Resolver
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-neutral-600">
-          Proof of concept: a Claude agent maps misspelled company names to the
-          Swiss company identification number via Firecrawl (web search +
-          scraping) - with a confidence score and a rationale.
+          Proof of concept: maps misspelled company names to the Swiss company
+          identification number via Firecrawl (web search + scraping) - with a
+          confidence score, a rationale and the employee headcount. Compare a Claude agent loop against
+          a code-driven pipeline that uses Jev (TypeSafe AI) for the decisions.
         </p>
       </header>
 
@@ -244,8 +248,10 @@ export default function Home() {
                 <th className="px-4 py-3">Input</th>
                 <th className="px-4 py-3">UID</th>
                 <th className="px-4 py-3">Official name</th>
+                <th className="px-4 py-3 text-right">Empl.</th>
                 <th className="px-4 py-3">Conf.</th>
                 <th className="px-4 py-3 text-right">Cost</th>
+                <th className="px-4 py-3 text-right">Time</th>
                 <th className="px-4 py-3" />
               </tr>
             </thead>
@@ -303,6 +309,9 @@ function RowView({
           {row.result?.official_name}
           {row.result?.domicile ? `, ${row.result.domicile}` : ""}
         </td>
+        <td className="px-4 py-3 text-right font-mono text-xs text-neutral-600">
+          {row.result?.employees}
+        </td>
         <td className="px-4 py-3">
           {row.result && (
             <span className={`rounded px-2 py-1 text-xs font-bold ${confColor}`}>
@@ -312,6 +321,9 @@ function RowView({
         </td>
         <td className="px-4 py-3 text-right font-mono text-xs text-neutral-500">
           {row.cost ? formatUsd(row.cost.total_usd) : ""}
+        </td>
+        <td className="px-4 py-3 text-right font-mono text-xs text-neutral-500">
+          {row.cost?.duration_ms ? formatDuration(row.cost.duration_ms) : ""}
         </td>
         <td className="px-4 py-3 text-right">
           <button
@@ -324,7 +336,7 @@ function RowView({
       </tr>
       {open && (
         <tr className="border-t border-neutral-100 bg-neutral-50">
-          <td colSpan={6} className="px-4 py-4">
+          <td colSpan={8} className="px-4 py-4">
             {row.result && (
               <div className="mb-4">
                 <p className="text-sm text-neutral-700">
@@ -430,9 +442,15 @@ function CostBreakdown({ cost }: { cost: Cost }) {
     ["Input tokens", cost.input_tokens.toLocaleString("en-US")],
     ["Output tokens", cost.output_tokens.toLocaleString("en-US")],
     [
-      `Claude (${MODELS.find((m) => m.id === cost.model)?.label ?? cost.model})`,
+      `Model (${MODELS.find((m) => m.id === cost.model)?.label ?? cost.model})`,
       formatUsd(cost.model_usd),
     ],
+    ...(cost.jev_requests > 0
+      ? ([["Jev requests", String(cost.jev_requests)]] as [string, string][])
+      : []),
+    ...(cost.duration_ms > 0
+      ? ([["Duration", formatDuration(cost.duration_ms)]] as [string, string][])
+      : []),
     [
       "Firecrawl",
       `${cost.firecrawl_searches} search / ${cost.firecrawl_scrapes} scrape = ${cost.firecrawl_credits} credits`,
