@@ -443,6 +443,18 @@ function CostSummary({ rows }: { rows: Row[] }) {
           ({total.firecrawl_credits} credits)
         </span>
       </div>
+      {total.duration_ms > 0 && (
+        <div className="text-neutral-500">
+          Time{" "}
+          <span className="font-semibold text-neutral-700">
+            {formatDuration(total.duration_ms)}
+          </span>
+          <span className="text-neutral-400">
+            {" "}
+            (Ø {formatDuration(total.duration_ms / priced)} per company)
+          </span>
+        </div>
+      )}
     </section>
   );
 }
