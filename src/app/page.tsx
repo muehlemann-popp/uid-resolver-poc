@@ -223,7 +223,7 @@ export default function Home() {
             disabled={running}
             className="rounded bg-[var(--color-mustard)] px-5 py-2 text-sm font-bold text-neutral-900 transition hover:brightness-95 disabled:opacity-50"
           >
-            {running ? "Running …" : "Resolve UIDs"}
+            {running ? "Running …" : "Find Company Employees"}
           </button>
           {running && (
             <button
