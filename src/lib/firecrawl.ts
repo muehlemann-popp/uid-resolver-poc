@@ -68,14 +68,16 @@ type ScrapeResponse = {
 export async function firecrawlScrape(
   url: string,
   maxChars = 12000,
+  options: { onlyMainContent?: boolean; waitFor?: number } = {},
 ): Promise<{ url: string; title?: string; markdown: string; truncated: boolean }> {
   const json = await post<ScrapeResponse>("/scrape", {
     url,
     formats: ["markdown"],
-    onlyMainContent: true,
+    onlyMainContent: options.onlyMainContent ?? true,
     blockAds: true,
     maxAge: 86400000, // 24h cache - saves credits on repeat lookups
-    timeout: 30000,
+    timeout: options.waitFor ? 45000 : 30000,
+    ...(options.waitFor ? { waitFor: options.waitFor } : {}),
   });
   const md = json.data?.markdown ?? "";
   return {

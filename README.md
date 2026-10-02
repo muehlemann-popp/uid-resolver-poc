@@ -230,6 +230,93 @@ Pricing basis (`src/lib/cost.ts`):
   Standard plan (100k credits / $83 per month = $0.00083). Set
   `FIRECRAWL_USD_PER_CREDIT` to match the actual plan.
 
+## SwissVR eligibility check
+
+Input: person, company, optionally a town. Output per person: one of
+**qualifiziert / qualifiziert nicht** (or **nicht mehr qualifiziert** with `--mode bestand`) **/ nicht beurteilbar**,
+the four criteria each as *erfüllt / nicht erfüllt / nicht ermittelbar* with rationale and source, and a
+list of criteria that rest on a weak source.
+
+The verdict is computed by code (`src/lib/swissvr/rules.ts`), not by the model. The pipeline:
+
+| # | Step | Who | Source |
+|---|---|---|---|
+| 1 | Find the company | code | Zefix search with name variants (umlauts, without legal form), scored; several near-equal hits are disambiguated by checking which one lists the person |
+| 2 | Register entry | code | Zefix: legal form, seat, status, purpose, SOGC publications, link to the cantonal extract |
+| 3 | Registered persons | code, LLM fallback | Cantonal extract (`*.chregister.ch`) rendered via Firecrawl, person table parsed deterministically. Other portals (GE, VD, FR) are read by the LLM. If the extract fails, the SOGC history is used |
+| 4 | Find the person | code | Name matching (umlauts, word order, middle names), role classification by legal form, residence |
+| 5 | Headcount + sector | Claude + Firecrawl | Skipped when the mandate already fails K1/K2 (unless `--thorough`) |
+| - | Fallback | Claude + Firecrawl | Company not in the Swiss register (foreign, public body) or person not in its register: web research delivers the same facts |
+| 6 | Further mandates | Claude + register | Only if the named mandate does not qualify: Moneyhouse person page / SOGC → each lead verified in the register |
+| 7 | Rules | code | Criteria, exclusions, precedence |
+
+Rules as implemented (`rules.ts`, unit-tested):
+
+- **K1** active board/supervisory mandate in the register. A cancelled entry or a non-board function → *nicht erfüllt*.
+  Not found in the register of the company → *nicht ermittelbar* (it may be held at a related entity). Namesakes,
+  self-declaration (LinkedIn) → *nicht ermittelbar*.
+- **K2** AG, Kommandit-AG, Genossenschaft, public-law institution; or exception sector (bank, hospital, care home,
+  public institution with economic activity, FINMA, SNB) with a board seat.
+- **Exclusions win over exceptions:** foundation boards (also of hospital foundations), pension funds, association
+  boards, GmbH partners/managers, partnerships, sole proprietors.
+- **K3** ≥ 10 employees; a bracket straddling 10 or < 10 FTE → *nicht ermittelbar*.
+  Sure sources, decided from the source URL: annual report, authorities, the company's own website, and the brackets
+  on the company's own LinkedIn page and jobs.ch / jobup.ch profile ("11-50" counts as sure - SwissVR decision of
+  2026-10-02). A team-page count from the own website is sure once it reaches 10. Group figures, other portals,
+  directories, press and Wikipedia are flagged uncertain.
+- **K4** Swiss residence (from the register entry) or Swiss seat.
+- Within a mandate *nicht erfüllt* beats *nicht ermittelbar*. With several mandates the best one decides.
+
+**Uncertainty instead of wrong answers.** Every criterion carries `certain`. Figures from job
+portals or group figures, register mirrors (Moneyhouse) and anything from web research instead of the Swiss register
+are marked uncertain. The CLI prints `⚠ unsicher`, the batch CSV has an `unsicher` column, and the eval reports
+the critical number separately: answers that are **wrong and not flagged**.
+
+**Metrics** (`pnpm cli metrics`, from one or more `eval -o` results):
+
+- *Falsch-sicher-Rate*: sure verdict that contradicts a definite test-set verdict, split into wrongly qualified /
+  wrongly rejected. Target ≤ 1 %.
+- *Automatisierungsquote*: share of persons decided with no uncertain criterion, i.e. no manual check. Target ≥ 70 %.
+- *Übereinstimmung Testset*: test set and system agree - both decide the same, or both stay open (the test set has
+  an "unbekannt", the system is unsure or "nicht beurteilbar"). Printed with the 3×3 matrix.
+- *Stabilität* (2+ runs): same verdict in every run. Target ≥ 95 %.
+
+Zefix: we use the JSON API behind zefix.ch, which needs no credentials but is not an official, versioned
+interface (the official ZefixPublicREST requires basic auth on request). Everything is in `src/lib/zefix.ts`.
+
+### Evaluation (2026-10-02, SwissVR sample, 35 persons, Sonnet 5)
+
+| Criterion | Hits | wrong + certain |
+|---|---|---|
+| K1 VR mandate | 32/35 | 1 |
+| K2 legal form | 34/35 | 0 |
+| K3 employees | 26/33 | 1 |
+| K4 seat / residence | 33/35 | 0 |
+| Verdict | 27/33 | |
+
+~$0.06 and ~17 s per person. The two "wrong + certain" cases: one person the register still lists as an active
+board member whereas the sample says "ausgeschieden", and one headcount (24) found on the company's own website where
+the sample has "keine Angaben" - both look like gaps in the sample rather than errors. Most other deviations are
+*ja → unbekannt*, i.e. the system says it does not know. Results vary slightly between runs because the web research
+is not deterministic. `eval -o` writes reason, certainty and source URL per criterion.
+
+## CLI
+
+```bash
+pnpm cli check "Hans Muster, Beispiel AG, Bern"      # one person (-v: show every tool call, --json)
+pnpm cli check "..." --mode bestand                  # "nicht mehr qualifiziert" instead of "qualifiziert nicht"
+pnpm cli batch personen.csv -o ergebnis.csv          # columns person,company[,town] | input | Vorname,Nachname,Firma
+pnpm cli eval "eval/261002 SwissVR | Testset.xlsx" -o eval/result.csv   # CSV or XLSX; eval/ is git-ignored (real names)
+pnpm cli eval "eval/261002 SwissVR | Testset.xlsx" --rerun eval/result.csv -o eval/result-2.csv  # only re-check cases that deviated
+pnpm cli metrics eval/run1.csv eval/run2.csv eval/run3.csv   # false-sure rate, automation, agreement, stability
+pnpm cli report eval/run1.csv eval/run2.csv eval/run3.csv -t "261002 SwissVR | Testset.xlsx" -o "eval/261002 SwissVR | Eval-Auswertung.html"   # readable HTML report
+pnpm cli resolve "Muehlemann und Pop Zuerich"        # existing UID resolver (-m opus|sonnet|jev)
+```
+
+Options: `-m opus|sonnet` (default Sonnet 5), `--no-further` (skip further mandates), `--thorough` (always research
+headcount), `-c` concurrency for batch/eval. The same commands exist as `task check|batch|eval|resolve -- ...`, and
+`task test` runs the unit tests. Keys are read from `.env.local`.
+
 ## Files
 
 | File | Contents |
@@ -246,6 +333,16 @@ Pricing basis (`src/lib/cost.ts`):
 | `src/app/api/resolve/route.ts` | NDJSON streaming endpoint |
 | `src/app/page.tsx` | UI |
 | `src/proxy.ts`, `src/app/login/` | Shared-password access gate |
+| `src/cli.ts` | CLI: check, batch, eval, resolve |
+| `src/lib/zefix.ts` | Zefix client (search, company detail, SOGC publications) |
+| `src/lib/swissvr/assess.ts` | SwissVR pipeline (steps 1-7) |
+| `src/lib/swissvr/register.ts` | Cantonal extract: person-table parser, LLM / SOGC fallback |
+| `src/lib/swissvr/match.ts` | Name matching, role classification, residence country |
+| `src/lib/swissvr/research.ts` | Claude steps: headcount + sector, web fallback, further mandates |
+| `src/lib/swissvr/rules.ts` | Qualification rules, certainty |
+| `src/lib/swissvr/types.ts` | Facts, criteria, events |
+| `src/lib/swissvr/metrics.ts` | Eval metrics: false-sure rate, automation, agreement, stability |
+| `src/lib/swissvr/report.ts` | HTML evaluation report |
 
 For the Claude path the intelligence lives in the system prompt in
 `src/lib/agent.ts`; for the Jev path it is split between the fixed pipeline and
@@ -315,4 +412,4 @@ the question wording in `src/lib/jev-agent.ts`.
 
 ---
 Created with AI assistance.
-Last updated: 2026-09-19 - Commit: a2e56ac
+Last updated: 2026-10-02 - Commit: 2b9ca29 (+ uncommitted SwissVR check)

@@ -22,10 +22,27 @@ tasks:
     cmds:
       - vercel deploy --prod
 
-  resolve:
-    desc: 'Single lookup via the API, e.g. task resolve -- "Muehlemann und Pop"'
+  test:
+    desc: Unit tests (rules, name matching, register parser)
     cmds:
-      - |
-        curl -sN -X POST http://localhost:3000/api/resolve \
-          -H 'Content-Type: application/json' \
-          -d (echo '{"companies":["{{.CLI_ARGS}}"]}')
+      - pnpm test
+
+  check:
+    desc: 'SwissVR check of one person, e.g. task check -- "Hans Muster, Beispiel AG, Bern"'
+    cmds:
+      - pnpm -s cli check {{.CLI_ARGS}}
+
+  batch:
+    desc: 'SwissVR check of a CSV, e.g. task batch -- personen.csv -o ergebnis.csv'
+    cmds:
+      - pnpm -s cli batch {{.CLI_ARGS}}
+
+  eval:
+    desc: 'Run against the SwissVR sample, e.g. task eval -- sample.csv -o eval.csv'
+    cmds:
+      - pnpm -s cli eval {{.CLI_ARGS}}
+
+  resolve:
+    desc: 'Company name -> UID, e.g. task resolve -- "Muehlemann und Pop"'
+    cmds:
+      - pnpm -s cli resolve {{.CLI_ARGS}}
