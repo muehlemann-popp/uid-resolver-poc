@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import type { AgentEvent, ResolveResult } from "@/lib/agent";
 import { formatEmployees } from "@/lib/employees";
+import { readNdjson } from "@/lib/ndjson";
 import {
   addCost,
   DEFAULT_MODEL,
@@ -64,63 +65,46 @@ export default function Home() {
         body: JSON.stringify({ companies, model }),
         signal: abort.current.signal,
       });
-      if (!res.ok || !res.body) throw new Error(await res.text());
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const e = JSON.parse(line) as AgentEvent | { type: "done" };
-
-          if (e.type === "start") {
-            current = e.company;
-            setOpen(e.company);
-            patch(e.company, (r) => ({ ...r, status: "running" }));
-          } else if (e.type === "thinking") {
-            patch(current, (r) => ({
-              ...r,
-              log: [...r.log, { kind: "thinking", text: e.text }],
-            }));
-          } else if (e.type === "tool_call") {
-            patch(current, (r) => ({
-              ...r,
-              log: [
-                ...r.log,
-                { kind: e.tool, text: JSON.stringify(e.input) },
-              ],
-            }));
-          } else if (e.type === "tool_result") {
-            patch(current, (r) => ({
-              ...r,
-              log: [...r.log, { kind: "↳", text: e.summary }],
-            }));
-          } else if (e.type === "cost") {
-            patch(e.company, (r) => ({ ...r, cost: e.cost }));
-          } else if (e.type === "result") {
-            patch(e.company, (r) => ({
-              ...r,
-              status: "done",
-              result: e.result,
-              cost: e.result.cost,
-            }));
-          } else if (e.type === "error") {
-            patch(current, (r) => ({
-              ...r,
-              status: "error",
-              log: [...r.log, { kind: "error", text: e.message }],
-            }));
-          }
+      await readNdjson<AgentEvent | { type: "done" }>(res, (e) => {
+        if (e.type === "start") {
+          current = e.company;
+          setOpen(e.company);
+          patch(e.company, (r) => ({ ...r, status: "running" }));
+        } else if (e.type === "thinking") {
+          patch(current, (r) => ({
+            ...r,
+            log: [...r.log, { kind: "thinking", text: e.text }],
+          }));
+        } else if (e.type === "tool_call") {
+          patch(current, (r) => ({
+            ...r,
+            log: [
+              ...r.log,
+              { kind: e.tool, text: JSON.stringify(e.input) },
+            ],
+          }));
+        } else if (e.type === "tool_result") {
+          patch(current, (r) => ({
+            ...r,
+            log: [...r.log, { kind: "↳", text: e.summary }],
+          }));
+        } else if (e.type === "cost") {
+          patch(e.company, (r) => ({ ...r, cost: e.cost }));
+        } else if (e.type === "result") {
+          patch(e.company, (r) => ({
+            ...r,
+            status: "done",
+            result: e.result,
+            cost: e.result.cost,
+          }));
+        } else if (e.type === "error") {
+          patch(current, (r) => ({
+            ...r,
+            status: "error",
+            log: [...r.log, { kind: "error", text: e.message }],
+          }));
         }
-      }
+      });
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         patch(current, (r) => ({
