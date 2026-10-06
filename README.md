@@ -1,16 +1,32 @@
 # Swiss Company Resolver (Proof of Concept)
 
-An agent built on the **Anthropic SDK** (Claude Opus 5 / Sonnet 5) + **Firecrawl**
-that maps misspelled company names to the Swiss company identification number
-(**UID**, `CHE-123.456.789`), together with a confidence score, a rationale and
-the employee headcount. A second, code-driven pipeline does the same lookup with **Jev** (TypeSafe AI)
-for a speed and price comparison - see "Jev variant" below.
+Two tools on the **Anthropic SDK** (Claude Opus 5 / Sonnet 5), **Firecrawl** and the
+Swiss commercial register (**Zefix**):
+
+1. **SwissVR eligibility check** - decides for "first name last name, company"
+   whether a person qualifies for SwissVR membership (board mandate, legal form,
+   at least 10 employees, Swiss residence or seat), with a source and a certainty
+   flag per criterion. Driven from the command line, measured against a test set.
+   See [SwissVR eligibility check](#swissvr-eligibility-check) and [CLI](#cli).
+2. **UID resolver** - maps misspelled company names to the Swiss company
+   identification number (**UID**, `CHE-123.456.789`), together with a confidence
+   score, a rationale and the employee headcount, in a web UI and an API. A second,
+   code-driven pipeline does the same lookup with **Jev** (TypeSafe AI) for a speed
+   and price comparison - see "Jev variant" below.
 
 Purpose: validate whether the approach works at all before building it out, and
 hand the developer a working reference implementation so they don't have to
 search in the dark.
 
-## What the agent does
+Quick start (after [Setup](#setup)):
+
+```bash
+pnpm cli check "Hans Muster, Beispiel AG, Bern"     # SwissVR check of one person
+pnpm cli resolve "Muehlemann und Pop Zuerich"       # company name -> UID
+task dev                                            # web UI of the UID resolver
+```
+
+## What the UID agent does
 
 ```
 Company name (possibly misspelled)
@@ -79,7 +95,7 @@ SITE_PASSWORD=...
 FIRECRAWL_USD_PER_CREDIT=0.00083   # optional, for the cost display
 ```
 
-## Usage
+## Usage (UID resolver)
 
 - **UI:** <http://localhost:3000> - enter company names one per line; results come
   back as a table (UID, official name, domicile, confidence) with an expandable
@@ -245,7 +261,7 @@ The verdict is computed by code (`src/lib/swissvr/rules.ts`), not by the model. 
 | 2 | Register entry | code | Zefix: legal form, seat, status, purpose, SOGC publications, link to the cantonal extract |
 | 3 | Registered persons | code, LLM fallback | Cantonal extract (`*.chregister.ch`) rendered via Firecrawl, person table parsed deterministically. Other portals (GE, VD, FR) are read by the LLM. If the extract fails, the SOGC history is used |
 | 4 | Find the person | code | Name matching (umlauts, word order, middle names), role classification by legal form, residence |
-| 5 | Headcount + sector | Claude + Firecrawl | Skipped when the mandate already fails K1/K2 (unless `--thorough`) |
+| 5 | Headcount + sector | code + one LLM read | Fixed search plan (`headcount.ts`): searches for the company's LinkedIn page, jobs.ch profile and website; brackets read from the snippets by regex; the website's team and about pages read once by the model, listed names counted in code. Priority: figure stated on the own website > own LinkedIn / jobs.ch bracket > team-page count. The open agent search (annual reports, press) only runs when this finds nothing. Skipped when the mandate already fails K1/K2 (unless `--thorough`) |
 | - | Fallback | Claude + Firecrawl | Company not in the Swiss register (foreign, public body) or person not in its register: web research delivers the same facts |
 | 6 | Further mandates | Claude + register | Only if the named mandate does not qualify: Moneyhouse person page / SOGC → each lead verified in the register |
 | 7 | Rules | code | Criteria, exclusions, precedence |
@@ -263,7 +279,9 @@ Rules as implemented (`rules.ts`, unit-tested):
   Sure sources, decided from the source URL: annual report, authorities, the company's own website, and the brackets
   on the company's own LinkedIn page and jobs.ch / jobup.ch profile ("11-50" counts as sure - SwissVR decision of
   2026-10-02). A team-page count from the own website is sure once it reaches 10. Group figures, other portals,
-  directories, press and Wikipedia are flagged uncertain.
+  directories, press and Wikipedia are flagged uncertain. "Own" means the domain or profile slug carries the
+  company's leading name word (at least 5 letters), or all of its distinctive words - one shared word is not
+  enough ("midcoglobal.com" is not the site of "Esperanto MidCo AG").
 - **K4** Swiss residence (from the register entry) or Swiss seat.
 - Within a mandate *nicht erfüllt* beats *nicht ermittelbar*. With several mandates the best one decides.
 
@@ -280,25 +298,31 @@ the critical number separately: answers that are **wrong and not flagged**.
 - *Übereinstimmung Testset*: test set and system agree - both decide the same, or both stay open (the test set has
   an "unbekannt", the system is unsure or "nicht beurteilbar"). Printed with the 3×3 matrix.
 - *Stabilität* (2+ runs): same verdict in every run. Target ≥ 95 %.
+- Cost per run and per person, average duration per check (`eval -o` writes `kosten_usd` and `dauer_s`).
+
+Every eval run is recorded in [`docs/optimierungslog.md`](docs/optimierungslog.md): what changed, test-set
+version, the metrics, cost and duration. The log names companies only, never persons.
 
 Zefix: we use the JSON API behind zefix.ch, which needs no credentials but is not an official, versioned
 interface (the official ZefixPublicREST requires basic auth on request). Everything is in `src/lib/zefix.ts`.
 
-### Evaluation (2026-10-02, SwissVR sample, 35 persons, Sonnet 5)
+### Evaluation (current state, run 10)
 
-| Criterion | Hits | wrong + certain |
+SwissVR test set (35 persons, 5 of them with invented companies, version T3), three independent runs, Sonnet 5:
+
+| Metric | Value | Target |
 |---|---|---|
-| K1 VR mandate | 32/35 | 1 |
-| K2 legal form | 34/35 | 0 |
-| K3 employees | 26/33 | 1 |
-| K4 seat / residence | 33/35 | 0 |
-| Verdict | 27/33 | |
+| False-sure rate | 0 % (0/25) in all runs | ≤ 1 % |
+| Automation rate | 46-49 % | ≥ 70 % |
+| Test-set agreement | 57-60 % | |
+| Stability | 91 % (32/35) | ≥ 95 % |
+| Cost | $1.90-2.22 per run, ~$0.06 per person | |
+| Duration | ~15 s per person | |
 
-~$0.06 and ~17 s per person. The two "wrong + certain" cases: one person the register still lists as an active
-board member whereas the sample says "ausgeschieden", and one headcount (24) found on the company's own website where
-the sample has "keine Angaben" - both look like gaps in the sample rather than errors. Most other deviations are
-*ja → unbekannt*, i.e. the system says it does not know. Results vary slightly between runs because the web research
-is not deterministic. `eval -o` writes reason, certainty and source URL per criterion.
+The fixed headcount search (run 9) raised automation from 26-34 % to 46-49 % and stability from 71 % to 91 %.
+What still keeps verdicts open: group figures for holding companies, third-party directories, companies outside
+the Swiss register, and persons missing from the register of the company given. The full history is in
+[`docs/optimierungslog.md`](docs/optimierungslog.md).
 
 ## CLI
 
@@ -314,8 +338,13 @@ pnpm cli resolve "Muehlemann und Pop Zuerich"        # existing UID resolver (-m
 ```
 
 Options: `-m opus|sonnet` (default Sonnet 5), `--no-further` (skip further mandates), `--thorough` (always research
-headcount), `-c` concurrency for batch/eval. The same commands exist as `task check|batch|eval|resolve -- ...`, and
-`task test` runs the unit tests. Keys are read from `.env.local`.
+headcount), `-c` concurrency for batch/eval, `--rerun <previous.csv>` (eval: re-check only the cases that deviated,
+carry the rest over; expected labels always come from the current test set). The same commands exist as
+`task check|batch|eval|resolve -- ...`, and `task test` runs the unit tests. Keys are read from `.env.local`; the
+Zefix API needs none.
+
+Measuring a change: three full `eval` runs without cache, then `metrics` and `report` over the three result files,
+then an entry in the optimisation log.
 
 ## Files
 
@@ -333,22 +362,27 @@ headcount), `-c` concurrency for batch/eval. The same commands exist as `task ch
 | `src/app/api/resolve/route.ts` | NDJSON streaming endpoint |
 | `src/app/page.tsx` | UI |
 | `src/proxy.ts`, `src/app/login/` | Shared-password access gate |
-| `src/cli.ts` | CLI: check, batch, eval, resolve |
+| `src/cli.ts` | CLI: check, batch, eval, metrics, report, resolve |
 | `src/lib/zefix.ts` | Zefix client (search, company detail, SOGC publications) |
 | `src/lib/swissvr/assess.ts` | SwissVR pipeline (steps 1-7) |
 | `src/lib/swissvr/register.ts` | Cantonal extract: person-table parser, LLM / SOGC fallback |
 | `src/lib/swissvr/match.ts` | Name matching, role classification, residence country |
-| `src/lib/swissvr/research.ts` | Claude steps: headcount + sector, web fallback, further mandates |
+| `src/lib/swissvr/headcount.ts` | Fixed headcount search: LinkedIn / jobs.ch brackets, own website, team-page count |
+| `src/lib/swissvr/research.ts` | Claude steps: open headcount search (fallback), web fallback for companies outside the register, further mandates |
+| `src/lib/swissvr/llm.ts` | Shared context for LLM steps: model, events, cost accounting |
 | `src/lib/swissvr/rules.ts` | Qualification rules, certainty |
 | `src/lib/swissvr/types.ts` | Facts, criteria, events |
 | `src/lib/swissvr/metrics.ts` | Eval metrics: false-sure rate, automation, agreement, stability |
 | `src/lib/swissvr/report.ts` | HTML evaluation report |
+| `src/lib/swissvr/swissvr.test.ts` | Unit tests: rules, name matching, register parser, own-source check, snippet brackets |
+| `docs/optimierungslog.md` | Optimisation log: every eval run with changes and metrics |
+| `eval/` | Test set and eval results - git-ignored (real names), local only |
 
 For the Claude path the intelligence lives in the system prompt in
 `src/lib/agent.ts`; for the Jev path it is split between the fixed pipeline and
 the question wording in `src/lib/jev-agent.ts`.
 
-## Observations from the test runs
+## Observations from the test runs (UID resolver)
 
 - `"Muehlemann und Pop Zuerich"` -> `CHE-115.471.001` (muehlemann+popp AG, Zurich),
   confidence 0.96, three searches and no scrape needed.
@@ -368,6 +402,20 @@ the question wording in `src/lib/jev-agent.ts`.
   "Recommended for production" below.
 
 ## Known limits of the PoC
+
+SwissVR check:
+
+- **Unofficial Zefix interface.** The JSON API behind zefix.ch needs no credentials but is not versioned; if it
+  changes, `src/lib/zefix.ts` is the one place to adapt. The official ZefixPublicREST needs basic auth on request.
+- **Small test set.** 35 persons: one case moves a metric by about 3 points, and "0 % false-sure" only says the
+  true rate is below roughly 11 %.
+- **Not fully deterministic.** Stability is 91 %; the remaining flips come from web research (company choice for
+  very common names, headcount).
+- **No cache.** The same company is researched again in every check.
+- **Person missing from the register** of the company given → K1 "nicht ermittelbar", by design (the mandate may be
+  held at a related entity).
+
+UID resolver:
 
 - **The Zefix search page is a SPA.** Scraping the hit list often yields empty
   text. The system prompt instructs the agent not to read that as "company does
@@ -408,8 +456,13 @@ the question wording in `src/lib/jev-agent.ts`.
    below that into a review queue.
 6. **Evaluation set**: 50-100 hand-verified name -> UID pairs from the real data,
    so prompt changes become measurable. Without it, every further improvement is
-   guesswork.
+   guesswork. For the SwissVR check a first test set (35 persons) and the
+   measuring tools exist; it should grow to 100-200 persons, chosen on purpose:
+   each exclusion type, ended mandates, holding vs. operating company, namesakes,
+   foreign companies, companies near 10 employees.
+7. **SwissVR: cache per company (UID)** so repeated checks of the same company give
+   the same answer and cost nothing.
 
 ---
 Created with AI assistance.
-Last updated: 2026-10-02 - Commit: 2b9ca29 (+ uncommitted SwissVR check)
+Last updated: 2026-10-06 - Commit: 285abe9
