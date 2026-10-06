@@ -46,3 +46,6 @@ next-env.d.ts
 
 # keep the template, not the real env files
 !.env.local.example
+
+# eval sets contain real names - never commit them (the repo is public)
+/eval/

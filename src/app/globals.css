@@ -11,3 +11,38 @@ body {
   background: hsl(0 0% 98%);
   color: var(--color-ink);
 }
+
+/* Demo stage (/demo) */
+@keyframes status-in {
+  from { opacity: 0; transform: translateY(40%); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes chip-in {
+  from { opacity: 0; transform: scale(0.4) translateX(-60%); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes cost-bump {
+  0% { transform: scale(1.08); text-shadow: 0 0 1.2cqw hsl(41 75% 61% / 0.8); }
+  100% { transform: none; text-shadow: none; }
+}
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 hsl(41 75% 61% / 0.7); }
+  100% { box-shadow: 0 0 0 1.6cqw hsl(41 75% 61% / 0); }
+}
+@keyframes banner-pop {
+  from { opacity: 0; transform: translateY(30%) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes caret {
+  50% { opacity: 0; }
+}
+.anim-status { animation: status-in 350ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-chip { animation: chip-in 400ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-cost { animation: cost-bump 600ms ease-out; transform-origin: left center; }
+.anim-ring { animation: pulse-ring 1.4s ease-out infinite; }
+.anim-banner { animation: banner-pop 600ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.anim-caret { animation: caret 1s steps(1) infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-status, .anim-chip, .anim-cost, .anim-ring, .anim-banner, .anim-caret { animation: none; }
+}
