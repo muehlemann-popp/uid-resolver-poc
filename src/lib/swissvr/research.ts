@@ -43,7 +43,7 @@ const employeesSchema = z
   .nullish()
   .describe("Headcount of THIS legal entity (or its group if only that is published - say so in notes); null if not found");
 
-const SECTORS = ["bank", "spital", "heim", "oeffentlich_wirtschaftlich", "finma", "snb", "pensionskasse", "keiner"] as const;
+export const SECTORS = ["bank", "spital", "heim", "oeffentlich_wirtschaftlich", "finma", "snb", "pensionskasse", "keiner"] as const;
 const sectorSchema = z
   .enum(SECTORS)
   .describe(

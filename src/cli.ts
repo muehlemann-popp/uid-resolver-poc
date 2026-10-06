@@ -28,6 +28,9 @@ try {
   // Keys may come from the environment instead.
 }
 
+/** A usable number from a CSV cell ("" and "abc" are not). */
+const r_ok = (v: number) => Number.isFinite(v) && v > 0;
+
 const MODEL_ALIASES: Record<string, ModelId> = {
   opus: "claude-opus-5",
   sonnet: "claude-sonnet-5",
@@ -410,6 +413,7 @@ program
         empfehlung_ist: x.gotVerdict,
         firma_gefunden: x.found,
         kosten_usd: x.rerun ? x.costUsd.toFixed(4) : "",
+        dauer_s: x.rerun ? (x.durationMs / 1000).toFixed(1) : "",
         neu_geprueft: x.rerun ? "ja" : "nein",
         vorher: x.before,
         fehler: x.error,
@@ -444,6 +448,15 @@ program
         `                          System:  qualif.  q. nicht     offen`,
         ...SIDES.map((t) => `    Testset ${t.padEnd(19)}${SIDES.map((sys) => cell(t, sys)).join(" ")}`),
       );
+      const costs = rows.map((r) => Number(r.kosten_usd)).filter((v) => r_ok(v));
+      const secs = rows.map((r) => Number(r.dauer_s)).filter((v) => r_ok(v));
+      if (costs.length) {
+        const sum = costs.reduce((a, b) => a + b, 0);
+        out.push(
+          `  Kosten                    ${formatUsd(sum).padEnd(8)} Ø ${formatUsd(sum / costs.length)} pro Person` +
+            (secs.length ? ` · Ø ${(secs.reduce((a, b) => a + b, 0) / secs.length).toFixed(1)} s pro Person` : ""),
+        );
+      }
       for (const r of [...m.wrongYes, ...m.wrongNo]) out.push(`    ✘ ${r.person}, ${r.firma}: Soll ${r.empfehlung_soll}, System ${r.empfehlung_ist}`);
       if (m.sureOpenInTestset.length) {
         out.push(`  System sicher, Testset offen (zum Kontrollieren, nicht als Fehler gezählt): ${m.sureOpenInTestset.length}`);

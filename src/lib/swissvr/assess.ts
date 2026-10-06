@@ -19,7 +19,8 @@ import { BRANCH_LEGAL_FORMS, LEGAL_FORMS, getFirm, searchFirms, type ZefixFirm }
 import { llmContext, type LlmContext } from "./llm";
 import { classifyRole, matchName, nameTokens, residenceCountry } from "./match";
 import { fetchBoard } from "./register";
-import { companyProfile, furtherMandates, webMandate } from "./research";
+import { furtherMandates, webMandate } from "./research";
+import { headcount } from "./headcount";
 import { alreadyFailed, assessMandate, decisiveMandate, personVerdict, uncertainties } from "./rules";
 import type {
   AssessEvent,
@@ -182,10 +183,11 @@ async function registerMandate(
 async function addProfile(m: MandateFacts, opts: AssessOptions, ctx: LlmContext, step: (s: string) => void) {
   if (!opts.thorough && alreadyFailed(m)) return;
   step(`Mitarbeitende und Branche: ${m.company.name}`);
-  const profile = await companyProfile(
+  const profile = await headcount(
     { name: m.company.name, uid: m.company.uid, seat: m.company.seat, purpose: m.company.purpose },
     ctx,
   );
+  step(`Mitarbeitende: ${profile.method}${profile.employees ? ` → ${profile.notes}` : " → nichts gefunden"}`);
   m.company.employees = profile.employees;
   m.company.employees_certain = profile.employees_certain;
   m.company.employees_checked = true;

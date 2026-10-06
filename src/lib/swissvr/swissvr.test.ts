@@ -6,6 +6,7 @@ import { parseChregisterPersons } from "./register";
 import { assessMandate, decisiveMandate, personVerdict, uncertainties } from "./rules";
 import { nameVariants, parseQuery, scoreFirm } from "./assess";
 import { firmDiffers } from "./report";
+import { parseBracket, teamLinks } from "./headcount";
 import type { MandateFacts } from "./types";
 
 /** A qualifying mandate; each test changes one fact. */
@@ -216,6 +217,13 @@ test("own website / own LinkedIn page decided from the URL", () => {
   assert.equal(isOwnSource("https://waisch.ch/firma/prologistik-schweiz-ag-zuerich", "proLogistik Schweiz AG"), null);
   assert.equal(isOwnSource("https://de.wikipedia.org/wiki/X", "X-TEC SWISS Holding AG"), null);
   assert.equal(isOwnSource("https://www.swissinfo.ch/x", "X-TEC SWISS Holding AG"), null);
+  // One shared word is not enough
+  assert.equal(isOwnSource("https://midcoglobal.com/about-us/our-team/", "Esperanto MidCo AG"), null);
+  assert.equal(isOwnSource("https://www.fgpfister.ch/ueber-uns", "F.G. Pfister Holding AG"), "website");
+  assert.equal(isOwnSource("https://www.tit-imhof.ch/ueber-uns/team/", "TIT Imhof Holding AG"), "website");
+  assert.equal(isOwnSource("https://www.swissdentalsolutions.com/", "Swiss Dental Solutions (SDS) Group AG"), "website");
+  assert.equal(isOwnSource("https://www.oxygenatwork.ch/", "Oxygen at Work AG"), "website");
+  assert.equal(isOwnSource("https://ch.linkedin.com/company/fc-luzern", "FC Luzern-Innerschweiz AG"), "linkedin");
 });
 
 test("report flags a different company, not an abbreviation", () => {
@@ -224,4 +232,17 @@ test("report flags a different company, not an abbreviation", () => {
   assert.equal(firmDiffers("TiT Imhof AG", "TIT Imhof Holding AG"), false);
   assert.equal(firmDiffers("Dataphone AG", "proLogistik Schweiz AG"), true);
   assert.equal(firmDiffers("BGB Immobiliendienste", "Bürgschaftsgenossenschaft Baselland (BGB)"), true);
+});
+
+test("headcount brackets from search snippets", () => {
+  assert.deepEqual(parseBracket("Durena AG | LinkedIn ... Unternehmensgrösse 11-50 Beschäftigte"), { min: 11, max: 50 });
+  assert.deepEqual(parseBracket("Company size: 1'001–5'000 employees"), { min: 1001, max: 5000 });
+  assert.deepEqual(parseBracket("21 - 50 Mitarbeitende · Zürich"), { min: 21, max: 50 });
+  assert.deepEqual(parseBracket("10,001+ employees"), { min: 10001, max: null });
+  assert.equal(parseBracket("Gegründet 2011, 3 Standorte"), null);
+});
+
+test("team and about links from the home page", () => {
+  const md = "[Home](/) [Über uns](/ueber-uns/) [Unser Team](https://www.durena.ch/Team.htm) [Shop](https://shop.example.com/team) [Kontakt](/kontakt)";
+  assert.deepEqual(teamLinks(md, "https://www.durena.ch/"), ["https://www.durena.ch/Team.htm", "https://www.durena.ch/ueber-uns/"]);
 });

@@ -126,9 +126,16 @@ export function isOwnSource(url: string, companyName: string): "website" | "link
   }
   const words = nameTokens(companyName).filter((t) => !LEGAL_WORDS.has(t) && t.length >= 3);
   if (words.length === 0) return null;
+  // Any shared word is not enough: "midcoglobal.com" is not the site of "Esperanto MidCo AG". It fits when
+  // the leading word (usually the brand, at least 5 letters) appears, or - with two distinctive words -
+  // both of them, with three or more all but one.
+  const needed = words.length <= 2 ? words.length : words.length - 1;
   const fits = (label: string) => {
     const flat = label.replace(/[^a-z]/g, "");
-    return flat.length >= 3 && words.some((w) => flat.includes(w) || (flat.length >= 4 && w.includes(flat)));
+    if (flat.length < 3) return false;
+    if (words.length === 1 && flat.length >= 4 && words[0].includes(flat)) return true;
+    if (words[0].length >= 5 && flat.includes(words[0])) return true;
+    return words.filter((w) => flat.includes(w)).length >= needed;
   };
   if (/(^|\.)linkedin\.com$/.test(host)) {
     const slug = path.match(/^\/company\/([^/]+)/)?.[1];
